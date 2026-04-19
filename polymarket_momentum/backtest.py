@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .strategy import momentum_signal, sized_position
+from .strategy import momentum_signal, sized_position, sized_position_hysteresis
 
 
 @dataclass
@@ -20,6 +20,7 @@ def backtest_market(
     *,
     lookback_hours: int = 24,
     entry_threshold: float = 0.05,
+    exit_threshold: float | None = None,
     fee_bps: float = 0.0,
     slippage_bps: float = 0.0,
     per_market_spread_bps: float | None = None,
@@ -36,7 +37,14 @@ def backtest_market(
     bars = prices.resample(resample_rule).last().ffill().dropna()
 
     signal = momentum_signal(bars, lookback_hours)
-    position = sized_position(signal, entry_threshold=entry_threshold)
+    if exit_threshold is None:
+        position = sized_position(signal, entry_threshold=entry_threshold)
+    else:
+        position = sized_position_hysteresis(
+            signal,
+            entry_threshold=entry_threshold,
+            exit_threshold=exit_threshold,
+        )
     if strategy == "reversion":
         position = -position
 
