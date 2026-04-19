@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel">
+    <h2>Most attractive bets</h2>
+    <p class="meta">
+        Source: <code>{{ ranking.source }}</code>
+        · fee model: <code>{{ ranking.fee_model_name }}</code>
+        · notional ${{ "%.0f"|format(ranking.target_notional) }}
+        · momentum lookback {{ ranking.lookback_hours }}h
+    </p>
+    {% if ranking.error %}
+        <p class="error">Error: {{ ranking.error }}</p>
+    {% elif not ranking.bets %}
+        <p class="muted">No markets cleared the signal threshold.</p>
+    {% else %}
+    <table>
+        <thead>
+            <tr>
+                <th>Market</th>
+                <th>Side</th>
+                <th>Signal</th>
+                <th>Ref</th>
+                <th>Edge / sh</th>
+                <th>Cost / sh</th>
+                <th>Net / sh</th>
+                <th>Spread</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for b in ranking.bets %}
+            <tr>
+                <td>
+                    {% if b.source == 'polymarket' %}
+                    <a href="https://polymarket.com/market/{{ b.slug }}" target="_blank" rel="noopener">{{ b.title }}</a>
+                    {% elif b.source == 'kalshi' %}
+                    <a href="https://kalshi.com/markets/{{ b.slug|lower }}" target="_blank" rel="noopener">{{ b.title }}</a>
+                    {% else %}
+                    {{ b.title }}
+                    {% endif %}
+                </td>
+                <td>{{ "Buy Yes" if b.side == "buy" else "Buy No" }}</td>
+                <td>{{ "%+.2f"|format(b.signal * 100) }}%</td>
+                <td>{{ "%.3f"|format(b.ref_price) }}</td>
+                <td>{{ "%.4f"|format(b.edge_per_share) }}</td>
+                <td>{{ "%.4f"|format(b.cost_per_share) }}</td>
+                <td class="{{ 'pos' if b.net_edge_per_share > 0 else 'neg' }}">
+                    {{ "%+.4f"|format(b.net_edge_per_share) }}
+                </td>
+                <td>{% if b.spread is not none %}{{ "%.3f"|format(b.spread) }}{% else %}—{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <h2>Current positions</h2>
+    {% if positions.error %}
+        <p class="error">Error: {{ positions.error }}</p>
+    {% elif not positions.positions %}
+        <p class="muted">No open positions.</p>
+    {% else %}
+    <p class="meta">Source: <code>{{ positions.source }}</code></p>
+    <table>
+        <thead>
+            <tr>
+                <th>Market</th>
+                <th>Outcome</th>
+                <th>Size</th>
+                <th>Avg</th>
+                <th>Current</th>
+                <th>Value</th>
+                <th>PnL</th>
+                <th>%</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in positions.positions %}
+            <tr>
+                <td>
+                    {% if p.source == 'polymarket' %}
+                    <a href="https://polymarket.com/market/{{ p.slug }}" target="_blank" rel="noopener">{{ p.title }}</a>
+                    {% elif p.source == 'kalshi' %}
+                    <a href="https://kalshi.com/markets/{{ p.slug|lower }}" target="_blank" rel="noopener">{{ p.title }}</a>
+                    {% else %}
+                    {{ p.title }}
+                    {% endif %}
+                </td>
+                <td>{{ p.outcome }}</td>
+                <td>{{ "%.2f"|format(p.size) }}</td>
+                <td>{{ "%.3f"|format(p.avg_price) }}</td>
+                <td>{{ "%.3f"|format(p.current_price) }}</td>
+                <td>${{ "%.2f"|format(p.current_value) }}</td>
+                <td class="{{ 'pos' if p.cash_pnl >= 0 else 'neg' }}">
+                    ${{ "%+.2f"|format(p.cash_pnl) }}
+                </td>
+                <td class="{{ 'pos' if p.percent_pnl >= 0 else 'neg' }}">
+                    {{ "%+.1f"|format(p.percent_pnl * 100) }}%
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</section>
+{% endblock %}

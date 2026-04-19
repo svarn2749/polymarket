@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}Momentum Dashboard{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+    <header>
+        <h1><a href="/">Momentum Dashboard</a></h1>
+        <form method="get" action="/" class="controls">
+            <label for="source">Source</label>
+            <select name="source" id="source">
+                <option value="polymarket" {% if settings.source == 'polymarket' %}selected{% endif %}>Polymarket</option>
+                <option value="kalshi" {% if settings.source == 'kalshi' %}selected{% endif %}>Kalshi</option>
+            </select>
+            <button type="submit">Refresh</button>
+        </form>
+    </header>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>
