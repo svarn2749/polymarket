@@ -215,24 +215,64 @@ def poll_once(
     )
 
 
-def _ensure_markets_csv(source: MarketSource, config: PaperConfig) -> None:
-    """On first boot (no markets.csv present), fetch a universe live and cache it."""
-    if config.markets_csv.exists():
-        return
-    print(f"[paper] no cached universe at {config.markets_csv} — fetching live from {source.name}")
+def _age_seconds(path) -> float | None:
+    try:
+        return time.time() - path.stat().st_mtime
+    except FileNotFoundError:
+        return None
+
+
+def _refresh_markets(source: MarketSource, config: PaperConfig) -> bool:
+    print(f"[paper] refreshing markets.csv from {source.name}")
     try:
         markets = source.list_markets(
             min_volume=config.min_volume,
             limit=max(100, config.universe_top_n * 3),
         )
     except Exception as exc:
-        print(f"[paper] live market list failed: {exc}")
-        return
+        print(f"[paper] markets refresh failed: {exc}")
+        return False
     if not markets:
-        print("[paper] live list_markets returned 0 markets — API issue?")
-        return
+        print("[paper] list_markets returned 0 markets — API issue?")
+        return False
     source.write_market_metadata(markets, config.markets_csv)
-    print(f"[paper] cached {len(markets)} markets to {config.markets_csv}")
+    print(f"[paper] wrote {len(markets)} markets to {config.markets_csv}")
+    return True
+
+
+def _refresh_spreads(config: PaperConfig) -> bool:
+    from ..snapshot_spreads import snapshot_spreads
+
+    if not config.markets_csv.exists():
+        return False
+    print(f"[paper] refreshing spreads.csv")
+    try:
+        snapshot_spreads(
+            config.markets_csv,
+            config.spreads_csv,
+            source_name=config.source,
+            concurrency=config.http_concurrency,
+        )
+        return True
+    except Exception as exc:
+        print(f"[paper] spreads refresh failed: {exc}")
+        return False
+
+
+def _maybe_refresh_metadata(source: MarketSource, config: PaperConfig) -> None:
+    """Refresh markets.csv / spreads.csv if missing or older than refresh_interval_days."""
+    max_age = config.refresh_interval_days * 86_400
+
+    markets_age = _age_seconds(config.markets_csv)
+    if markets_age is None or markets_age > max_age:
+        if _refresh_markets(source, config):
+            # Force spreads refresh too when markets list changes.
+            _refresh_spreads(config)
+            return
+
+    spreads_age = _age_seconds(config.spreads_csv)
+    if spreads_age is None or spreads_age > max_age:
+        _refresh_spreads(config)
 
 
 async def poll_loop(config: PaperConfig, stop: asyncio.Event) -> None:
@@ -245,7 +285,7 @@ async def poll_loop(config: PaperConfig, stop: asyncio.Event) -> None:
 
     source = get_source(config.source)
     while not stop.is_set():
-        await asyncio.to_thread(_ensure_markets_csv, source, config)
+        await asyncio.to_thread(_maybe_refresh_metadata, source, config)
         universe = load_universe(
             source=config.source,
             markets_csv=config.markets_csv,

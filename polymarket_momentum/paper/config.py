@@ -47,6 +47,7 @@ class PaperConfig:
     poll_interval_sec: int = 300     # 5 min
     startup_delay_sec: int = 5
     http_concurrency: int = 8
+    refresh_interval_days: float = 7.0   # markets.csv + spreads.csv
 
     # Storage
     db_path: Path = field(default_factory=_default_db_path)
