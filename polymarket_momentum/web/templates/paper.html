@@ -169,7 +169,9 @@ async function renderEquityChart(el, strategy) {
         return;
     }
 
-    const w = 800, h = 180, padL = 52, padR = 16, padT = 10, padB = 30;
+    // Real pixel dimensions so text isn't stretched and dots stay circular.
+    const w = Math.max(400, Math.floor(el.clientWidth || el.parentElement.clientWidth || 800));
+    const h = 180, padL = 60, padR = 16, padT = 10, padB = 28;
     const tsMin = points[0].ts, tsMax = points[points.length - 1].ts;
     const tsRange = (tsMax - tsMin) || 1;
     const values = points.flatMap(p => [p.total_pnl, p.realized_pnl]);
@@ -209,7 +211,7 @@ async function renderEquityChart(el, strategy) {
         <text x="${w - padR}" y="${h - 8}" class="axis-label" text-anchor="end">${fmtTs(tsMax)}</text>`;
 
     el.innerHTML = `
-        <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" class="equity-chart">
+        <svg width="${w}" height="${h}" class="equity-chart">
             ${yTickSvg}
             <path d="${areaPath}" fill="${fillColor}"></path>
             <path d="${totalPath}" fill="none" stroke="${strokeColor}" stroke-width="1.5"></path>
