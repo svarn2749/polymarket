@@ -2,57 +2,6 @@
 
 {% block title %}Paper Trading{% endblock %}
 
-{% block content %}
-<section class="panel">
-    <h2>Paper trading</h2>
-    <p class="meta">
-        Source: <code>{{ view.config.source }}</code>
-        · strategy: <code>{{ view.config.strategy }}</code>
-        · lookback: {{ view.config.lookback_hours }}h
-        · threshold: {{ "%.0f"|format(view.config.entry_threshold * 100) }}%
-        · fill: <code>{{ view.config.fill_model }}</code>
-        · size: ${{ "%.0f"|format(view.config.position_size_usd) }}/position
-        · universe top {{ view.config.universe_top_n }} (spread ≤ {{ view.config.max_spread_bps }}bps)
-        · poll every {{ view.config.poll_interval_sec }}s
-        {% if not view.config.enabled %}· <span class="neg">DISABLED</span>{% endif %}
-    </p>
-
-    {% if view.latest_equity %}
-    <div class="summary">
-        <div><span class="label">Total PnL</span>
-            <span class="value {{ 'pos' if view.latest_equity.total_pnl >= 0 else 'neg' }}">
-                ${{ "%+.2f"|format(view.latest_equity.total_pnl) }}
-            </span>
-        </div>
-        <div><span class="label">Realized</span>
-            <span class="value">${{ "%+.2f"|format(view.latest_equity.realized_pnl) }}</span>
-        </div>
-        <div><span class="label">Unrealized</span>
-            <span class="value">${{ "%+.2f"|format(view.latest_equity.unrealized_pnl) }}</span>
-        </div>
-        <div><span class="label">Open positions</span>
-            <span class="value">{{ view.latest_equity.n_positions }}</span>
-        </div>
-        <div><span class="label">Gross exposure</span>
-            <span class="value">${{ "%.2f"|format(view.latest_equity.gross_exposure) }}</span>
-        </div>
-    </div>
-    {% else %}
-    <p class="muted">No equity history yet — poller may still be warming up.</p>
-    {% endif %}
-
-    {% if view.last_poll %}
-    <p class="meta">
-        Last poll: {{ view.last_poll.ts }} ·
-        {{ view.last_poll.duration_ms }}ms ·
-        {{ view.last_poll.n_markets }} markets ·
-        {{ view.last_poll.n_trades }} trades ·
-        {{ view.last_poll.n_errors }} errors
-        {% if view.last_poll.note %}({{ view.last_poll.note }}){% endif %}
-    </p>
-    {% endif %}
-</section>
-
 {% macro market_link(slug, source, question, market_id) -%}
 {%- if question -%}
     {%- if source == 'polymarket' and slug -%}
@@ -67,9 +16,40 @@
 {%- endif -%}
 {%- endmacro %}
 
+{% macro strategy_block(s) -%}
 <section class="panel">
-    <h2>Open paper positions</h2>
-    {% if not view.positions %}
+    <h2>{{ s.label }}</h2>
+
+    {% if s.latest_equity %}
+    <div class="summary">
+        <div><span class="label">Total PnL</span>
+            <span class="value {{ 'pos' if s.latest_equity.total_pnl >= 0 else 'neg' }}">
+                ${{ "%+.2f"|format(s.latest_equity.total_pnl) }}
+            </span>
+        </div>
+        <div><span class="label">Realized</span>
+            <span class="value {{ 'pos' if s.latest_equity.realized_pnl >= 0 else 'neg' }}">
+                ${{ "%+.2f"|format(s.latest_equity.realized_pnl) }}
+            </span>
+        </div>
+        <div><span class="label">Unrealized</span>
+            <span class="value {{ 'pos' if s.latest_equity.unrealized_pnl >= 0 else 'neg' }}">
+                ${{ "%+.2f"|format(s.latest_equity.unrealized_pnl) }}
+            </span>
+        </div>
+        <div><span class="label">Open positions</span>
+            <span class="value">{{ s.latest_equity.n_positions }}</span>
+        </div>
+        <div><span class="label">Gross exposure</span>
+            <span class="value">${{ "%.2f"|format(s.latest_equity.gross_exposure) }}</span>
+        </div>
+    </div>
+    {% else %}
+    <p class="muted">No equity history yet.</p>
+    {% endif %}
+
+    <h3>Open positions</h3>
+    {% if not s.positions %}
         <p class="muted">No open positions.</p>
     {% else %}
     <table>
@@ -87,7 +67,7 @@
             </tr>
         </thead>
         <tbody>
-            {% for p in view.positions %}
+            {% for p in s.positions %}
             <tr>
                 <td>{{ market_link(p.slug, p.source, p.question, p.market_id) }}</td>
                 <td class="{{ 'neg' if p.size < 0 else 'pos' if p.size > 0 else '' }}">{{ p.direction }}</td>
@@ -103,11 +83,17 @@
         </tbody>
     </table>
     {% endif %}
-</section>
 
-<section class="panel">
-    <h2>Recent paper trades</h2>
-    {% if not view.recent_trades %}
+    {% if s.realized_from_closed != 0 %}
+    <p class="meta">Realized from fully-closed positions:
+        <span class="{{ 'pos' if s.realized_from_closed >= 0 else 'neg' }}">
+            ${{ "%+.2f"|format(s.realized_from_closed) }}
+        </span>
+    </p>
+    {% endif %}
+
+    <h3>Recent trades</h3>
+    {% if not s.recent_trades %}
         <p class="muted">No trades yet.</p>
     {% else %}
     <table>
@@ -122,7 +108,7 @@
             </tr>
         </thead>
         <tbody>
-            {% for t in view.recent_trades %}
+            {% for t in s.recent_trades %}
             <tr>
                 <td class="muted">{{ t.ts_iso }}</td>
                 <td>{{ market_link(t.slug, t.source, t.question, t.market_id) }}</td>
@@ -136,4 +122,36 @@
     </table>
     {% endif %}
 </section>
+{%- endmacro %}
+
+{% block content %}
+<section class="panel">
+    <h2>Paper trading</h2>
+    <p class="meta">
+        Source: <code>{{ view.config.source }}</code>
+        · lookback: {{ view.config.lookback_hours }}h
+        · reversion threshold: {{ "%.0f"|format(view.config.entry_threshold * 100) }}%
+        · cross-sectional top_k: {{ view.config.cross_sectional_top_k }}
+        · fill: <code>{{ view.config.fill_model }}</code>
+        · size: ${{ "%.0f"|format(view.config.position_size_usd) }}/position
+        · universe top {{ view.config.universe_top_n }} (spread ≤ {{ view.config.max_spread_bps }}bps)
+        · poll every {{ view.config.poll_interval_sec }}s
+        {% if not view.config.enabled %}· <span class="neg">DISABLED</span>{% endif %}
+    </p>
+
+    {% if view.last_poll %}
+    <p class="meta">
+        Last poll: {{ view.last_poll.ts }} ·
+        {{ view.last_poll.duration_ms }}ms ·
+        {{ view.last_poll.n_markets }} markets ·
+        {{ view.last_poll.n_trades }} trades ·
+        {{ view.last_poll.n_errors }} errors
+        {% if view.last_poll.note %}({{ view.last_poll.note }}){% endif %}
+    </p>
+    {% endif %}
+</section>
+
+{% for s in view.strategies %}
+{{ strategy_block(s) }}
+{% endfor %}
 {% endblock %}

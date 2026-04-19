@@ -44,16 +44,27 @@ def record_trade(
     )
 
 
-def current_positions(conn: sqlite3.Connection) -> dict[str, PaperPosition]:
+def current_positions(
+    conn: sqlite3.Connection,
+    *,
+    strategy: str | None = None,
+) -> dict[str, PaperPosition]:
     """Reconstruct current positions from the full trades log.
 
     Uses weighted-average entry price; realized PnL accumulates on closes /
     reversals. Rebuilt from scratch each time for simplicity — trades log is
-    the source of truth.
+    the source of truth. Pass `strategy` to scope to one strategy's trades.
     """
-    rows = conn.execute(
-        "SELECT ts, market_id, size, price FROM trades ORDER BY id ASC"
-    ).fetchall()
+    if strategy is None:
+        rows = conn.execute(
+            "SELECT ts, market_id, size, price FROM trades ORDER BY id ASC"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT ts, market_id, size, price FROM trades "
+            "WHERE strategy = ? ORDER BY id ASC",
+            (strategy,),
+        ).fetchall()
 
     state: dict[str, PaperPosition] = {}
     for row in rows:
@@ -84,14 +95,19 @@ def current_positions(conn: sqlite3.Connection) -> dict[str, PaperPosition]:
 
         state[mid] = pos
 
-    # Drop zero-size positions.
-    return {k: v for k, v in state.items() if abs(v.size) > 1e-9}
+    # Keep closed positions that still carry realized PnL; the dashboard
+    # can filter to open (size != 0) positions when displaying.
+    return {
+        k: v for k, v in state.items()
+        if abs(v.size) > 1e-9 or abs(v.realized_pnl) > 1e-9
+    }
 
 
 def record_equity(
     conn: sqlite3.Connection,
     *,
     ts: int,
+    strategy: str,
     realized: float,
     unrealized: float,
     gross_exposure: float,
@@ -99,9 +115,9 @@ def record_equity(
 ) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO equity "
-        "(ts, realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (ts, realized, unrealized, realized + unrealized, gross_exposure, n_positions),
+        "(ts, strategy, realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (ts, strategy, realized, unrealized, realized + unrealized, gross_exposure, n_positions),
     )
 
 

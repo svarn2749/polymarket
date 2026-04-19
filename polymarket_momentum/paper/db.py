@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS trades (
     source TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_trades_market ON trades(market_id, ts);
+CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy, ts);
 
 CREATE TABLE IF NOT EXISTS signals (
     ts INTEGER NOT NULL,
@@ -37,12 +38,14 @@ CREATE TABLE IF NOT EXISTS snapshots (
 );
 
 CREATE TABLE IF NOT EXISTS equity (
-    ts INTEGER PRIMARY KEY,
+    ts INTEGER NOT NULL,
+    strategy TEXT NOT NULL DEFAULT 'reversion',
     realized_pnl REAL NOT NULL,
     unrealized_pnl REAL NOT NULL,
     total_pnl REAL NOT NULL,
     gross_exposure REAL NOT NULL,
-    n_positions INTEGER NOT NULL
+    n_positions INTEGER NOT NULL,
+    PRIMARY KEY (ts, strategy)
 );
 
 CREATE TABLE IF NOT EXISTS poll_log (
@@ -56,9 +59,41 @@ CREATE TABLE IF NOT EXISTS poll_log (
 """
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Carry old equity rows forward by tagging them strategy='reversion'."""
+    info = conn.execute("PRAGMA table_info(equity)").fetchall()
+    if not info:
+        return  # fresh DB — schema will create the new-shape table
+    cols = {r[1] for r in info}
+    if "strategy" in cols:
+        return  # already migrated
+    conn.executescript(
+        """
+        ALTER TABLE equity RENAME TO equity_pre_strategy;
+        CREATE TABLE equity (
+            ts INTEGER NOT NULL,
+            strategy TEXT NOT NULL DEFAULT 'reversion',
+            realized_pnl REAL NOT NULL,
+            unrealized_pnl REAL NOT NULL,
+            total_pnl REAL NOT NULL,
+            gross_exposure REAL NOT NULL,
+            n_positions INTEGER NOT NULL,
+            PRIMARY KEY (ts, strategy)
+        );
+        INSERT INTO equity
+            (ts, strategy, realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions)
+        SELECT
+            ts, 'reversion', realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions
+        FROM equity_pre_strategy;
+        DROP TABLE equity_pre_strategy;
+        """
+    )
+
+
 def init(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
+        _migrate(conn)
         conn.executescript(SCHEMA)
 
 

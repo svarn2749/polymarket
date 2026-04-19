@@ -33,10 +33,14 @@ class PaperConfig:
     max_spread_bps: float = 400.0
     min_volume: float = 50_000.0  # for live fallback fetch on cold boot
 
-    # Strategy (reversion is the validated winner)
-    strategy: str = "reversion"
+    # Strategy (both are run in parallel on the same universe)
+    strategy: str = "reversion"   # legacy — kept for compatibility / reporting
     lookback_hours: int = 24
-    entry_threshold: float = 0.20
+    entry_threshold: float = 0.20  # per-market reversion threshold
+
+    # Cross-sectional strategy: long the bottom-K signal, short the top-K.
+    cross_sectional_enabled: bool = True
+    cross_sectional_top_k: int = 10
 
     # Execution
     fill_model: str = "realistic"  # "mid" | "realistic" | "half_spread"

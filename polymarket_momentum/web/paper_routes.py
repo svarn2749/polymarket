@@ -18,6 +18,12 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 router = APIRouter(prefix="/paper")
 
+STRATEGIES = ("reversion", "cross_sectional")
+STRATEGY_LABELS = {
+    "reversion": "Per-market reversion",
+    "cross_sectional": "Cross-sectional reversion",
+}
+
 
 @dataclass
 class MarketMeta:
@@ -32,7 +38,7 @@ class PaperPositionRow:
     question: str
     slug: str
     source: str
-    direction: str  # "long YES" / "short YES"
+    direction: str
     size: float
     avg_entry_price: float
     last_price: float | None
@@ -68,11 +74,19 @@ class PaperTradeRow:
 
 
 @dataclass
+class StrategyView:
+    name: str
+    label: str
+    positions: list[PaperPositionRow]
+    recent_trades: list[PaperTradeRow]
+    latest_equity: EquityPoint | None
+    realized_from_closed: float  # PnL from fully-closed positions (not in positions table)
+
+
+@dataclass
 class PaperView:
     config: dict
-    positions: list[PaperPositionRow]
-    latest_equity: EquityPoint | None
-    recent_trades: list[PaperTradeRow]
+    strategies: list[StrategyView]
     last_poll: dict | None
 
 
@@ -107,92 +121,117 @@ def _direction_label(size: float) -> str:
     return "flat"
 
 
+def _strategy_view(
+    conn,
+    *,
+    strategy: str,
+    meta: dict[str, MarketMeta],
+    config: PaperConfig,
+) -> StrategyView:
+    all_positions = current_positions(conn, strategy=strategy)
+    open_rows: list[PaperPositionRow] = []
+    realized_from_closed = 0.0
+    for pos in all_positions.values():
+        if abs(pos.size) <= 1e-9:
+            realized_from_closed += pos.realized_pnl
+            continue
+        snap = conn.execute(
+            "SELECT mid FROM snapshots WHERE market_id = ? ORDER BY ts DESC LIMIT 1",
+            (pos.market_id,),
+        ).fetchone()
+        if snap and snap["mid"] is not None:
+            pos.last_price = float(snap["mid"])
+        m = meta.get(pos.market_id) or MarketMeta(source=config.source)
+        open_rows.append(
+            PaperPositionRow(
+                market_id=pos.market_id,
+                question=m.question,
+                slug=m.slug,
+                source=m.source,
+                direction=_direction_label(pos.size),
+                size=pos.size,
+                avg_entry_price=pos.avg_entry_price,
+                last_price=pos.last_price,
+                realized_pnl=pos.realized_pnl,
+                unrealized_pnl=pos.unrealized_pnl,
+                total_pnl=pos.realized_pnl + pos.unrealized_pnl,
+                notional=pos.notional,
+            )
+        )
+    open_rows.sort(key=lambda r: -abs(r.total_pnl))
+
+    eq_row = conn.execute(
+        "SELECT ts, realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions "
+        "FROM equity WHERE strategy = ? ORDER BY ts DESC LIMIT 1",
+        (strategy,),
+    ).fetchone()
+    latest_equity = (
+        EquityPoint(
+            ts=int(eq_row["ts"]),
+            realized_pnl=float(eq_row["realized_pnl"]),
+            unrealized_pnl=float(eq_row["unrealized_pnl"]),
+            total_pnl=float(eq_row["total_pnl"]),
+            gross_exposure=float(eq_row["gross_exposure"]),
+            n_positions=int(eq_row["n_positions"]),
+        )
+        if eq_row
+        else None
+    )
+
+    trade_rows = conn.execute(
+        "SELECT ts, market_id, side, size, price, signal, strategy "
+        "FROM trades WHERE strategy = ? ORDER BY id DESC LIMIT 25",
+        (strategy,),
+    ).fetchall()
+    trades: list[PaperTradeRow] = []
+    for r in trade_rows:
+        market_id = str(r["market_id"])
+        m = meta.get(market_id) or MarketMeta(source=config.source)
+        trades.append(
+            PaperTradeRow(
+                ts=int(r["ts"]),
+                ts_iso=_fmt_ts(int(r["ts"])),
+                market_id=market_id,
+                question=m.question,
+                slug=m.slug,
+                source=m.source,
+                side=str(r["side"]),
+                size=float(r["size"]),
+                price=float(r["price"]),
+                signal=(float(r["signal"]) if r["signal"] is not None else None),
+                strategy=(str(r["strategy"]) if r["strategy"] is not None else None),
+            )
+        )
+
+    return StrategyView(
+        name=strategy,
+        label=STRATEGY_LABELS.get(strategy, strategy),
+        positions=open_rows,
+        recent_trades=trades,
+        latest_equity=latest_equity,
+        realized_from_closed=realized_from_closed,
+    )
+
+
 def _build_view(config: PaperConfig) -> PaperView:
     if not config.db_path.exists():
         return PaperView(
             config=_config_summary(config),
-            positions=[],
-            latest_equity=None,
-            recent_trades=[],
+            strategies=[
+                StrategyView(
+                    name=s, label=STRATEGY_LABELS.get(s, s),
+                    positions=[], recent_trades=[],
+                    latest_equity=None, realized_from_closed=0.0,
+                )
+                for s in STRATEGIES
+            ],
             last_poll=None,
         )
 
     meta = _load_market_meta(config)
 
-    def _meta(market_id: str) -> MarketMeta:
-        return meta.get(str(market_id)) or MarketMeta(source=config.source)
-
     with connect(config.db_path) as conn:
-        positions_dict = current_positions(conn)
-
-        # Enrich positions with latest mid from snapshots.
-        positions_rows: list[PaperPositionRow] = []
-        for pos in positions_dict.values():
-            snap = conn.execute(
-                "SELECT mid FROM snapshots WHERE market_id = ? ORDER BY ts DESC LIMIT 1",
-                (pos.market_id,),
-            ).fetchone()
-            if snap and snap["mid"] is not None:
-                pos.last_price = float(snap["mid"])
-            m = _meta(pos.market_id)
-            positions_rows.append(
-                PaperPositionRow(
-                    market_id=pos.market_id,
-                    question=m.question,
-                    slug=m.slug,
-                    source=m.source,
-                    direction=_direction_label(pos.size),
-                    size=pos.size,
-                    avg_entry_price=pos.avg_entry_price,
-                    last_price=pos.last_price,
-                    realized_pnl=pos.realized_pnl,
-                    unrealized_pnl=pos.unrealized_pnl,
-                    total_pnl=pos.realized_pnl + pos.unrealized_pnl,
-                    notional=pos.notional,
-                )
-            )
-        positions_rows.sort(key=lambda r: -abs(r.total_pnl))
-
-        eq_row = conn.execute(
-            "SELECT ts, realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions "
-            "FROM equity ORDER BY ts DESC LIMIT 1"
-        ).fetchone()
-        latest_equity = (
-            EquityPoint(
-                ts=int(eq_row["ts"]),
-                realized_pnl=float(eq_row["realized_pnl"]),
-                unrealized_pnl=float(eq_row["unrealized_pnl"]),
-                total_pnl=float(eq_row["total_pnl"]),
-                gross_exposure=float(eq_row["gross_exposure"]),
-                n_positions=int(eq_row["n_positions"]),
-            )
-            if eq_row
-            else None
-        )
-
-        trade_rows = conn.execute(
-            "SELECT ts, market_id, side, size, price, signal, strategy "
-            "FROM trades ORDER BY id DESC LIMIT 25"
-        ).fetchall()
-        trades: list[PaperTradeRow] = []
-        for r in trade_rows:
-            market_id = str(r["market_id"])
-            m = _meta(market_id)
-            trades.append(
-                PaperTradeRow(
-                    ts=int(r["ts"]),
-                    ts_iso=_fmt_ts(int(r["ts"])),
-                    market_id=market_id,
-                    question=m.question,
-                    slug=m.slug,
-                    source=m.source,
-                    side=str(r["side"]),
-                    size=float(r["size"]),
-                    price=float(r["price"]),
-                    signal=(float(r["signal"]) if r["signal"] is not None else None),
-                    strategy=(str(r["strategy"]) if r["strategy"] is not None else None),
-                )
-            )
+        strategies = [_strategy_view(conn, strategy=s, meta=meta, config=config) for s in STRATEGIES]
 
         poll_row = conn.execute(
             "SELECT ts, duration_ms, n_markets, n_errors, n_trades, note "
@@ -202,9 +241,7 @@ def _build_view(config: PaperConfig) -> PaperView:
 
     return PaperView(
         config=_config_summary(config),
-        positions=positions_rows,
-        latest_equity=latest_equity,
-        recent_trades=trades,
+        strategies=strategies,
         last_poll=last_poll,
     )
 
@@ -222,6 +259,8 @@ def _config_summary(config: PaperConfig) -> dict:
         "max_spread_bps": config.max_spread_bps,
         "db_path": str(config.db_path),
         "enabled": config.enabled,
+        "cross_sectional_enabled": config.cross_sectional_enabled,
+        "cross_sectional_top_k": config.cross_sectional_top_k,
     }
 
 
@@ -237,26 +276,36 @@ def paper_dashboard(request: Request):
 
 
 @router.get("/api/positions")
-def api_positions(request: Request):
+def api_positions(request: Request, strategy: str | None = None):
     config = _config_from_request(request)
     view = _build_view(config)
-    return JSONResponse({"positions": [asdict(p) for p in view.positions]})
+    out = {
+        s.name: [asdict(p) for p in s.positions] for s in view.strategies
+    }
+    if strategy is not None:
+        return JSONResponse({"strategy": strategy, "positions": out.get(strategy, [])})
+    return JSONResponse({"by_strategy": out})
 
 
 @router.get("/api/equity")
-def api_equity(request: Request, limit: int = 500):
+def api_equity(request: Request, strategy: str | None = None, limit: int = 500):
     config = _config_from_request(request)
     if not config.db_path.exists():
         return JSONResponse({"points": []})
     with connect(config.db_path) as conn:
-        rows = conn.execute(
-            "SELECT ts, realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions "
-            "FROM equity ORDER BY ts ASC LIMIT ?",
-            (limit,),
-        ).fetchall()
-    return JSONResponse(
-        {"points": [dict(r) for r in rows]}
-    )
+        if strategy is None:
+            rows = conn.execute(
+                "SELECT ts, strategy, realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions "
+                "FROM equity ORDER BY ts ASC LIMIT ?",
+                (limit * len(STRATEGIES),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT ts, strategy, realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions "
+                "FROM equity WHERE strategy = ? ORDER BY ts ASC LIMIT ?",
+                (strategy, limit),
+            ).fetchall()
+    return JSONResponse({"points": [dict(r) for r in rows]})
 
 
 @router.get("/api/health")
@@ -267,6 +316,13 @@ def api_health(request: Request):
         {
             "config": view.config,
             "last_poll": view.last_poll,
-            "latest_equity": asdict(view.latest_equity) if view.latest_equity else None,
+            "strategies": {
+                s.name: {
+                    "latest_equity": asdict(s.latest_equity) if s.latest_equity else None,
+                    "n_open_positions": len(s.positions),
+                    "realized_from_closed": s.realized_from_closed,
+                }
+                for s in view.strategies
+            },
         }
     )

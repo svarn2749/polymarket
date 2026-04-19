@@ -10,7 +10,7 @@ import httpx
 import pandas as pd
 
 from ..sources import get_source
-from ..sources.base import Market, MarketSource
+from ..sources.base import Market, MarketSource, OrderBook
 from .config import PaperConfig
 from .db import connect, init
 from .fills import fill_price
@@ -29,12 +29,24 @@ class PollSummary:
     duration_ms: int
     n_markets: int
     n_signals: int
-    n_trades: int
+    n_reversion_trades: int
+    n_cross_sectional_trades: int
     n_errors: int
+
+    @property
+    def n_trades(self) -> int:
+        return self.n_reversion_trades + self.n_cross_sectional_trades
+
+
+@dataclass
+class MarketEval:
+    market: Market
+    signal: float
+    mid: float
+    book: OrderBook
 
 
 def _compute_signal(prices: pd.Series, lookback_hours: int) -> float | None:
-    # Resample to 1h, require at least (lookback+1) bars.
     hourly = prices.resample("1h").last().ffill().dropna()
     if len(hourly) < lookback_hours + 1:
         return None
@@ -45,68 +57,188 @@ def _compute_signal(prices: pd.Series, lookback_hours: int) -> float | None:
     return now_price / then_price - 1.0
 
 
-def _desired_size(
-    *,
-    signal: float,
-    threshold: float,
-    strategy: str,
-    mid: float,
-    position_size_usd: float,
-) -> float:
-    if abs(signal) <= threshold or mid <= 0:
-        return 0.0
-    direction = math.copysign(1.0, signal)
-    if strategy == "reversion":
-        direction = -direction
-    return direction * position_size_usd / mid
-
-
-def _evaluate_market(
+def _fetch_evals(
     source: MarketSource,
-    market: Market,
+    universe: list[Market],
     *,
     config: PaperConfig,
-    current_size: float,
     client: httpx.Client,
-) -> tuple[float | None, float | None, float | None, tuple[str, float, float] | None]:
-    """Evaluate one market. Returns (signal, mid, decided_direction, trade_tuple).
+    conn,
+    ts: int,
+) -> tuple[list[MarketEval], int]:
+    evals: list[MarketEval] = []
+    errors = 0
+    price_lookback_days = max(2, math.ceil((config.lookback_hours + 4) / 24))
 
-    trade_tuple is (side, size_delta, fill_price) if a trade should happen, else None.
-    """
-    df = source.get_price_history(
-        market,
-        lookback_days=max(2, math.ceil((config.lookback_hours + 4) / 24)),
-        fidelity=60,
-        client=client,
-    )
-    if df.empty or "price" not in df.columns:
-        return None, None, None, None
-    prices = df.set_index("ts")["price"]
-    signal = _compute_signal(prices, config.lookback_hours)
-    if signal is None:
-        return None, None, None, None
+    for market in universe:
+        try:
+            df = source.get_price_history(
+                market,
+                lookback_days=price_lookback_days,
+                fidelity=60,
+                client=client,
+            )
+        except Exception:
+            errors += 1
+            traceback.print_exc()
+            continue
+        if df.empty or "price" not in df.columns:
+            continue
+        prices = df.set_index("ts")["price"]
+        signal = _compute_signal(prices, config.lookback_hours)
+        if signal is None:
+            continue
 
-    book = source.get_order_book(market, client=client)
-    if book.mid is None or book.best_bid is None or book.best_ask is None:
-        return signal, None, None, None
+        try:
+            book = source.get_order_book(market, client=client)
+        except Exception:
+            errors += 1
+            continue
+        if book.mid is None or book.best_bid is None or book.best_ask is None:
+            continue
 
-    desired_size = _desired_size(
-        signal=signal,
-        threshold=config.entry_threshold,
-        strategy=config.strategy,
-        mid=book.mid,
-        position_size_usd=config.position_size_usd,
-    )
-    direction = 0.0 if desired_size == 0 else math.copysign(1.0, desired_size)
-    delta = desired_size - current_size
-    if abs(delta * book.mid) < config.min_trade_usd:
-        return signal, book.mid, direction, None
+        conn.execute(
+            "INSERT OR REPLACE INTO snapshots (ts, market_id, bid, ask, mid) VALUES (?, ?, ?, ?, ?)",
+            (ts, market.id, book.best_bid, book.best_ask, book.mid),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO signals (ts, market_id, value, direction) VALUES (?, ?, ?, ?)",
+            (ts, market.id, signal, 0.0),
+        )
+        evals.append(MarketEval(market=market, signal=signal, mid=book.mid, book=book))
+    return evals, errors
 
+
+def _execute_trade(
+    conn,
+    *,
+    ts: int,
+    market_id: str,
+    delta: float,
+    signal: float,
+    strategy: str,
+    source_name: str,
+    book: OrderBook,
+    config: PaperConfig,
+) -> bool:
+    if abs(delta * (book.mid or 0)) < config.min_trade_usd:
+        return False
     side = "buy" if delta > 0 else "sell"
     fp = fill_price(side=side, book=book, model=config.fill_model)
     if fp is None:
-        return signal, book.mid, direction, None
-    return signal, book.mid, direction, (side, delta, fp)
+        return False
+    record_trade(
+        conn,
+        ts=ts,
+        market_id=market_id,
+        side=side,
+        size=delta,
+        price=fp,
+        signal=signal,
+        strategy=strategy,
+        source=source_name,
+    )
+    return True
+
+
+def _apply_reversion(
+    evals: list[MarketEval],
+    *,
+    config: PaperConfig,
+    conn,
+    ts: int,
+    source_name: str,
+) -> int:
+    held = current_positions(conn, strategy="reversion")
+    eval_by_id = {e.market.id: e for e in evals}
+    n_trades = 0
+
+    # 1) Evaluate markets currently visible in the universe.
+    for e in evals:
+        current_size = held[e.market.id].size if e.market.id in held else 0.0
+        if abs(e.signal) > config.entry_threshold:
+            direction = -math.copysign(1.0, e.signal)  # fade
+            desired = direction * config.position_size_usd / e.mid
+        else:
+            desired = 0.0
+        delta = desired - current_size
+        if _execute_trade(
+            conn, ts=ts, market_id=e.market.id, delta=delta, signal=e.signal,
+            strategy="reversion", source_name=source_name, book=e.book, config=config,
+        ):
+            n_trades += 1
+
+    # 2) Positions held but no longer in universe — can't close this cycle; leave for later.
+    #    (Orderbook not available; would need a targeted fetch. TODO.)
+    return n_trades
+
+
+def _apply_cross_sectional(
+    evals: list[MarketEval],
+    *,
+    config: PaperConfig,
+    conn,
+    ts: int,
+    source_name: str,
+) -> int:
+    k = config.cross_sectional_top_k
+    if len(evals) < 2 * k:
+        return 0
+
+    sorted_evals = sorted(evals, key=lambda e: e.signal)
+    long_targets = sorted_evals[:k]         # biggest drops → bet on bounce
+    short_targets = sorted_evals[-k:]       # biggest rallies → bet on fade
+    eval_by_id = {e.market.id: e for e in evals}
+
+    target_sizes: dict[str, float] = {}
+    for e in long_targets:
+        target_sizes[e.market.id] = +config.position_size_usd / e.mid
+    for e in short_targets:
+        target_sizes[e.market.id] = -config.position_size_usd / e.mid
+
+    held = current_positions(conn, strategy="cross_sectional")
+    for market_id in held:
+        target_sizes.setdefault(market_id, 0.0)  # close positions that rolled off the leaderboard
+
+    n_trades = 0
+    for market_id, target in target_sizes.items():
+        current_size = held[market_id].size if market_id in held else 0.0
+        delta = target - current_size
+        e = eval_by_id.get(market_id)
+        if e is None:
+            # Market no longer visible this cycle — skip close for now.
+            continue
+        if _execute_trade(
+            conn, ts=ts, market_id=market_id, delta=delta, signal=e.signal,
+            strategy="cross_sectional", source_name=source_name, book=e.book, config=config,
+        ):
+            n_trades += 1
+    return n_trades
+
+
+def _mark_to_market(conn, *, ts: int, strategy: str) -> None:
+    positions = current_positions(conn, strategy=strategy)
+    realized = sum(p.realized_pnl for p in positions.values())
+    unrealized = 0.0
+    gross = 0.0
+    for p in positions.values():
+        snap = conn.execute(
+            "SELECT mid FROM snapshots WHERE market_id = ? ORDER BY ts DESC LIMIT 1",
+            (p.market_id,),
+        ).fetchone()
+        if snap and snap["mid"] is not None:
+            p.last_price = float(snap["mid"])
+        unrealized += p.unrealized_pnl
+        gross += p.notional
+    record_equity(
+        conn,
+        ts=ts,
+        strategy=strategy,
+        realized=realized,
+        unrealized=unrealized,
+        gross_exposure=gross,
+        n_positions=len(positions),
+    )
 
 
 def poll_once(
@@ -118,81 +250,26 @@ def poll_once(
     ts = int(started)
     init(config.db_path)
 
-    n_signals = 0
-    n_trades = 0
-    n_errors = 0
-
     limits = httpx.Limits(
         max_keepalive_connections=config.http_concurrency,
         max_connections=config.http_concurrency * 2,
     )
 
     with httpx.Client(timeout=20, limits=limits) as client, connect(config.db_path) as conn:
-        positions = current_positions(conn)
-        for market in universe:
-            current_size = positions[market.id].size if market.id in positions else 0.0
-            try:
-                signal, mid, direction, trade = _evaluate_market(
-                    source, market, config=config, current_size=current_size, client=client
-                )
-            except Exception:
-                n_errors += 1
-                traceback.print_exc()
-                continue
-
-            if signal is None:
-                continue
-            n_signals += 1
-
-            if mid is not None:
-                conn.execute(
-                    "INSERT OR REPLACE INTO snapshots (ts, market_id, bid, ask, mid) VALUES (?, ?, ?, ?, ?)",
-                    (ts, market.id, None, None, mid),
-                )
-            conn.execute(
-                "INSERT OR REPLACE INTO signals (ts, market_id, value, direction) VALUES (?, ?, ?, ?)",
-                (ts, market.id, signal, direction if direction is not None else 0.0),
-            )
-
-            if trade is None:
-                continue
-            side, size_delta, fp = trade
-            record_trade(
-                conn,
-                ts=ts,
-                market_id=market.id,
-                side=side,
-                size=size_delta,
-                price=fp,
-                signal=signal,
-                strategy=config.strategy,
-                source=source.name,
-            )
-            n_trades += 1
-
-        # Recompute positions after trades, then mark-to-market for equity.
-        positions = current_positions(conn)
-        realized = sum(p.realized_pnl for p in positions.values())
-        unrealized = 0.0
-        gross = 0.0
-        for p in positions.values():
-            snap_row = conn.execute(
-                "SELECT mid FROM snapshots WHERE market_id = ? ORDER BY ts DESC LIMIT 1",
-                (p.market_id,),
-            ).fetchone()
-            if snap_row and snap_row["mid"] is not None:
-                p.last_price = float(snap_row["mid"])
-            unrealized += p.unrealized_pnl
-            gross += p.notional
-
-        record_equity(
-            conn,
-            ts=ts,
-            realized=realized,
-            unrealized=unrealized,
-            gross_exposure=gross,
-            n_positions=len(positions),
+        evals, errors = _fetch_evals(
+            source, universe, config=config, client=client, conn=conn, ts=ts
         )
+        reversion_trades = _apply_reversion(
+            evals, config=config, conn=conn, ts=ts, source_name=source.name
+        )
+        cs_trades = 0
+        if config.cross_sectional_enabled:
+            cs_trades = _apply_cross_sectional(
+                evals, config=config, conn=conn, ts=ts, source_name=source.name
+            )
+
+        _mark_to_market(conn, ts=ts, strategy="reversion")
+        _mark_to_market(conn, ts=ts, strategy="cross_sectional")
 
         duration_ms = int((time.time() - started) * 1000)
         record_poll(
@@ -200,18 +277,19 @@ def poll_once(
             ts=ts,
             duration_ms=duration_ms,
             n_markets=len(universe),
-            n_errors=n_errors,
-            n_trades=n_trades,
-            note=f"signals={n_signals}",
+            n_errors=errors,
+            n_trades=reversion_trades + cs_trades,
+            note=f"signals={len(evals)} rev={reversion_trades} cs={cs_trades}",
         )
 
     return PollSummary(
         ts=ts,
         duration_ms=int((time.time() - started) * 1000),
         n_markets=len(universe),
-        n_signals=n_signals,
-        n_trades=n_trades,
-        n_errors=n_errors,
+        n_signals=len(evals),
+        n_reversion_trades=reversion_trades,
+        n_cross_sectional_trades=cs_trades,
+        n_errors=errors,
     )
 
 
@@ -260,13 +338,11 @@ def _refresh_spreads(config: PaperConfig) -> bool:
 
 
 def _maybe_refresh_metadata(source: MarketSource, config: PaperConfig) -> None:
-    """Refresh markets.csv / spreads.csv if missing or older than refresh_interval_days."""
     max_age = config.refresh_interval_days * 86_400
 
     markets_age = _age_seconds(config.markets_csv)
     if markets_age is None or markets_age > max_age:
         if _refresh_markets(source, config):
-            # Force spreads refresh too when markets list changes.
             _refresh_spreads(config)
             return
 
@@ -303,7 +379,8 @@ async def poll_loop(config: PaperConfig, stop: asyncio.Event) -> None:
                 summary = await asyncio.to_thread(poll_once, source, universe, config)
                 print(
                     f"[paper] ts={summary.ts} markets={summary.n_markets} "
-                    f"signals={summary.n_signals} trades={summary.n_trades} "
+                    f"signals={summary.n_signals} "
+                    f"rev={summary.n_reversion_trades} cs={summary.n_cross_sectional_trades} "
                     f"errors={summary.n_errors} took={summary.duration_ms}ms"
                 )
             except Exception:
