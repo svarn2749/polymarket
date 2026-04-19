@@ -105,6 +105,11 @@ def _fetch_evals(
             "INSERT OR REPLACE INTO signals (ts, market_id, value, direction) VALUES (?, ?, ?, ?)",
             (ts, market.id, signal, 0.0),
         )
+        conn.execute(
+            "INSERT OR REPLACE INTO market_meta (market_id, source, question, slug, updated_ts) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (market.id, market.source, market.question, market.slug, ts),
+        )
         evals.append(MarketEval(market=market, signal=signal, mid=book.mid, book=book))
     return evals, errors
 

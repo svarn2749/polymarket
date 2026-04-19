@@ -96,16 +96,34 @@ def _config_from_request(request: Request) -> PaperConfig:
 
 
 def _load_market_meta(config: PaperConfig) -> dict[str, MarketMeta]:
-    if not config.markets_csv.exists():
-        return {}
-    df = pd.read_csv(config.markets_csv, dtype=str)
+    """Load market metadata from SQLite (authoritative, persists across universe
+    refreshes), overlaying current markets.csv if present. SQLite holds metadata
+    for every market the poller has ever observed — so positions opened before
+    a universe refresh still render cleanly.
+    """
     out: dict[str, MarketMeta] = {}
-    for row in df.to_dict(orient="records"):
-        out[str(row["id"])] = MarketMeta(
-            question=str(row.get("question") or ""),
-            slug=str(row.get("slug") or ""),
-            source=str(row.get("source") or config.source),
-        )
+    if config.db_path.exists():
+        with connect(config.db_path) as conn:
+            for r in conn.execute(
+                "SELECT market_id, question, slug, source FROM market_meta"
+            ):
+                out[str(r["market_id"])] = MarketMeta(
+                    question=str(r["question"] or ""),
+                    slug=str(r["slug"] or ""),
+                    source=str(r["source"] or config.source),
+                )
+    if config.markets_csv.exists():
+        df = pd.read_csv(config.markets_csv, dtype=str)
+        for row in df.to_dict(orient="records"):
+            # markets.csv "wins" over SQLite only when SQLite has no record yet
+            # (fresh universe entry whose first poll hasn't completed).
+            mid = str(row["id"])
+            if mid not in out:
+                out[mid] = MarketMeta(
+                    question=str(row.get("question") or ""),
+                    slug=str(row.get("slug") or ""),
+                    source=str(row.get("source") or config.source),
+                )
     return out
 
 

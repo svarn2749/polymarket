@@ -56,6 +56,14 @@ CREATE TABLE IF NOT EXISTS poll_log (
     n_trades INTEGER,
     note TEXT
 );
+
+CREATE TABLE IF NOT EXISTS market_meta (
+    market_id TEXT PRIMARY KEY,
+    source TEXT,
+    question TEXT,
+    slug TEXT,
+    updated_ts INTEGER
+);
 """
 
 
