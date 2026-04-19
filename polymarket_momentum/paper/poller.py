@@ -106,9 +106,11 @@ def _fetch_evals(
             (ts, market.id, signal, 0.0),
         )
         conn.execute(
-            "INSERT OR REPLACE INTO market_meta (market_id, source, question, slug, updated_ts) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (market.id, market.source, market.question, market.slug, ts),
+            "INSERT OR REPLACE INTO market_meta "
+            "(market_id, source, question, slug, yes_id, no_id, updated_ts) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (market.id, market.source, market.question, market.slug,
+             market.yes_id, market.no_id, ts),
         )
         evals.append(MarketEval(market=market, signal=signal, mid=book.mid, book=book))
     return evals, errors
@@ -230,40 +232,113 @@ def _apply_cross_sectional(
     conn,
     ts: int,
     source_name: str,
+    source: MarketSource,
+    client: httpx.Client,
 ) -> int:
     k = config.cross_sectional_top_k
     if len(evals) < 2 * k:
         return 0
 
+    # Rank hysteresis: enter at top_k, hold until outside top_k * band.
+    band = max(1.0, config.cross_sectional_exit_band)
+    exit_k = max(k + 1, int(k * band))
+    exit_k = min(exit_k, len(evals) // 2)  # can't exceed half the universe
+
     sorted_evals = sorted(evals, key=lambda e: e.signal)
-    long_targets = sorted_evals[:k]         # biggest drops → bet on bounce
-    short_targets = sorted_evals[-k:]       # biggest rallies → bet on fade
     eval_by_id = {e.market.id: e for e in evals}
 
-    target_sizes: dict[str, float] = {}
-    for e in long_targets:
-        target_sizes[e.market.id] = +config.position_size_usd / e.mid
-    for e in short_targets:
-        target_sizes[e.market.id] = -config.position_size_usd / e.mid
+    new_long = {e.market.id for e in sorted_evals[:k]}       # biggest drops — enter long
+    new_short = {e.market.id for e in sorted_evals[-k:]}     # biggest rallies — enter short
+    hold_long = {e.market.id for e in sorted_evals[:exit_k]}
+    hold_short = {e.market.id for e in sorted_evals[-exit_k:]}
 
     held = current_positions(conn, strategy="cross_sectional")
-    for market_id in held:
-        target_sizes.setdefault(market_id, 0.0)  # close positions that rolled off the leaderboard
+    target_sizes: dict[str, float] = {}
+
+    # 1) Existing held positions: hold, flip, or close.
+    for mid, pos in held.items():
+        if pos.size > 0:
+            if mid in hold_long:
+                target_sizes[mid] = +config.position_size_usd / eval_by_id[mid].mid
+            elif mid in new_short:
+                target_sizes[mid] = -config.position_size_usd / eval_by_id[mid].mid
+            else:
+                target_sizes[mid] = 0.0
+        elif pos.size < 0:
+            if mid in hold_short:
+                target_sizes[mid] = -config.position_size_usd / eval_by_id[mid].mid
+            elif mid in new_long:
+                target_sizes[mid] = +config.position_size_usd / eval_by_id[mid].mid
+            else:
+                target_sizes[mid] = 0.0
+
+    # 2) New entries for markets in the entry zone that aren't already held.
+    for mid in new_long:
+        if mid not in target_sizes:
+            target_sizes[mid] = +config.position_size_usd / eval_by_id[mid].mid
+    for mid in new_short:
+        if mid not in target_sizes:
+            target_sizes[mid] = -config.position_size_usd / eval_by_id[mid].mid
+
+    # 3) Stuck positions (held but not in this cycle's evals) — target = 0
+    #    so we close them via a targeted orderbook fetch below.
+    for mid in held:
+        if mid not in eval_by_id and mid not in target_sizes:
+            target_sizes[mid] = 0.0
 
     n_trades = 0
-    for market_id, target in target_sizes.items():
-        current_size = held[market_id].size if market_id in held else 0.0
+    for mid, target in target_sizes.items():
+        current_size = held[mid].size if mid in held else 0.0
         delta = target - current_size
-        e = eval_by_id.get(market_id)
-        if e is None:
-            # Market no longer visible this cycle — skip close for now.
+        if delta == 0.0:
             continue
+
+        e = eval_by_id.get(mid)
+        if e is not None:
+            book = e.book
+            signal_val = e.signal
+        else:
+            book = _fetch_book_for_held(conn, mid, source=source, client=client)
+            signal_val = 0.0
+            if book is None:
+                continue
+
         if _execute_trade(
-            conn, ts=ts, market_id=market_id, delta=delta, signal=e.signal,
-            strategy="cross_sectional", source_name=source_name, book=e.book, config=config,
+            conn, ts=ts, market_id=mid, delta=delta, signal=signal_val,
+            strategy="cross_sectional", source_name=source_name, book=book, config=config,
         ):
             n_trades += 1
     return n_trades
+
+
+def _fetch_book_for_held(conn, market_id: str, *, source: MarketSource, client: httpx.Client):
+    """Reconstruct a Market from market_meta and fetch its live orderbook so we
+    can close a stuck position that's no longer in the current universe. Returns
+    None if tokens are missing or the book is one-sided.
+    """
+    row = conn.execute(
+        "SELECT source, question, slug, yes_id, no_id FROM market_meta WHERE market_id = ?",
+        (market_id,),
+    ).fetchone()
+    if row is None or not row["yes_id"]:
+        return None
+    market = Market(
+        source=str(row["source"] or source.name),
+        id=market_id,
+        question=str(row["question"] or ""),
+        slug=str(row["slug"] or ""),
+        yes_id=str(row["yes_id"]),
+        no_id=str(row["no_id"] or ""),
+        volume=0.0,
+        end_date=None,
+    )
+    try:
+        book = source.get_order_book(market, client=client)
+    except Exception:
+        return None
+    if book.mid is None or book.best_bid is None or book.best_ask is None:
+        return None
+    return book
 
 
 def _mark_to_market(conn, *, ts: int, strategy: str) -> None:
@@ -315,7 +390,8 @@ def poll_once(
         cs_trades = 0
         if config.cross_sectional_enabled:
             cs_trades = _apply_cross_sectional(
-                evals, config=config, conn=conn, ts=ts, source_name=source.name
+                evals, config=config, conn=conn, ts=ts, source_name=source.name,
+                source=source, client=client,
             )
 
         _mark_to_market(conn, ts=ts, strategy="reversion")

@@ -51,6 +51,10 @@ class PaperConfig:
     # Cross-sectional strategy: long the bottom-K signal, short the top-K.
     cross_sectional_enabled: bool = True
     cross_sectional_top_k: int = 10
+    # Hysteresis for cross-sectional: once held, keep a market until its rank
+    # falls outside top_k * this multiplier. Prevents churn for markets that
+    # oscillate around the leaderboard boundary. 1.0 disables hysteresis.
+    cross_sectional_exit_band: float = 1.5
 
     # Execution
     fill_model: str = "realistic"  # "mid" | "realistic" | "half_spread"

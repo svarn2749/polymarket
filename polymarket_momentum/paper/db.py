@@ -62,40 +62,49 @@ CREATE TABLE IF NOT EXISTS market_meta (
     source TEXT,
     question TEXT,
     slug TEXT,
+    yes_id TEXT,
+    no_id TEXT,
     updated_ts INTEGER
 );
 """
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Carry old equity rows forward by tagging them strategy='reversion'."""
+    # equity: add `strategy` to PK
     info = conn.execute("PRAGMA table_info(equity)").fetchall()
-    if not info:
-        return  # fresh DB — schema will create the new-shape table
-    cols = {r[1] for r in info}
-    if "strategy" in cols:
-        return  # already migrated
-    conn.executescript(
-        """
-        ALTER TABLE equity RENAME TO equity_pre_strategy;
-        CREATE TABLE equity (
-            ts INTEGER NOT NULL,
-            strategy TEXT NOT NULL DEFAULT 'reversion',
-            realized_pnl REAL NOT NULL,
-            unrealized_pnl REAL NOT NULL,
-            total_pnl REAL NOT NULL,
-            gross_exposure REAL NOT NULL,
-            n_positions INTEGER NOT NULL,
-            PRIMARY KEY (ts, strategy)
-        );
-        INSERT INTO equity
-            (ts, strategy, realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions)
-        SELECT
-            ts, 'reversion', realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions
-        FROM equity_pre_strategy;
-        DROP TABLE equity_pre_strategy;
-        """
-    )
+    if info:
+        cols = {r[1] for r in info}
+        if "strategy" not in cols:
+            conn.executescript(
+                """
+                ALTER TABLE equity RENAME TO equity_pre_strategy;
+                CREATE TABLE equity (
+                    ts INTEGER NOT NULL,
+                    strategy TEXT NOT NULL DEFAULT 'reversion',
+                    realized_pnl REAL NOT NULL,
+                    unrealized_pnl REAL NOT NULL,
+                    total_pnl REAL NOT NULL,
+                    gross_exposure REAL NOT NULL,
+                    n_positions INTEGER NOT NULL,
+                    PRIMARY KEY (ts, strategy)
+                );
+                INSERT INTO equity
+                    (ts, strategy, realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions)
+                SELECT
+                    ts, 'reversion', realized_pnl, unrealized_pnl, total_pnl, gross_exposure, n_positions
+                FROM equity_pre_strategy;
+                DROP TABLE equity_pre_strategy;
+                """
+            )
+
+    # market_meta: add yes_id, no_id so stuck positions can fetch their own orderbook
+    info = conn.execute("PRAGMA table_info(market_meta)").fetchall()
+    if info:
+        cols = {r[1] for r in info}
+        if "yes_id" not in cols:
+            conn.execute("ALTER TABLE market_meta ADD COLUMN yes_id TEXT")
+        if "no_id" not in cols:
+            conn.execute("ALTER TABLE market_meta ADD COLUMN no_id TEXT")
 
 
 def init(db_path: Path) -> None:
