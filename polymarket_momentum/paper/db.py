@@ -106,8 +106,10 @@ def init(db_path: Path) -> None:
 
 
 @contextmanager
-def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(db_path)
+def connect(db_path: Path, *, timeout_s: float = 10.0) -> Iterator[sqlite3.Connection]:
+    conn = sqlite3.connect(db_path, timeout=timeout_s)
+    # If the other process is in the middle of a write, wait instead of erroring.
+    conn.execute(f"PRAGMA busy_timeout = {int(timeout_s * 1000)}")
     conn.row_factory = sqlite3.Row
     try:
         yield conn

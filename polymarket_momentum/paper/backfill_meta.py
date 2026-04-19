@@ -31,6 +31,7 @@ def main() -> None:
     config = PaperConfig.from_env()
     init(config.db_path)
 
+    # Phase 1: read missing IDs (short read transaction).
     with connect(config.db_path) as conn:
         missing = [
             r["market_id"]
@@ -40,33 +41,34 @@ def main() -> None:
                 "WHERE m.market_id IS NULL"
             )
         ]
-        if not missing:
-            print("no missing metadata")
-            return
-        print(f"backfilling {len(missing)} markets from Polymarket")
+    if not missing:
+        print("no missing metadata")
+        return
+    print(f"backfilling {len(missing)} markets from Polymarket")
 
-        ts = int(time.time())
-        filled = 0
-        with httpx.Client(timeout=15) as client:
-            for i, mid in enumerate(missing, 1):
-                payload = _fetch_one(client, mid)
-                if payload is None:
-                    print(f"  [{i}/{len(missing)}] {mid} — not found")
-                    continue
-                conn.execute(
-                    "INSERT OR REPLACE INTO market_meta (market_id, source, question, slug, updated_ts) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (
-                        mid,
-                        args.source,
-                        payload.get("question") or "",
-                        payload.get("slug") or "",
-                        ts,
-                    ),
-                )
-                filled += 1
-                print(f"  [{i}/{len(missing)}] {mid} — {(payload.get('question') or '')[:60]}")
-        print(f"backfilled {filled}/{len(missing)}")
+    # Phase 2: HTTP fetches — no DB lock held, so poller can run freely.
+    fetched: list[tuple[str, str, str]] = []
+    with httpx.Client(timeout=15) as client:
+        for i, mid in enumerate(missing, 1):
+            payload = _fetch_one(client, mid)
+            if payload is None:
+                print(f"  [{i}/{len(missing)}] {mid} — not found")
+                continue
+            question = payload.get("question") or ""
+            slug = payload.get("slug") or ""
+            fetched.append((mid, question, slug))
+            print(f"  [{i}/{len(missing)}] {mid} — {question[:60]}")
+
+    # Phase 3: single short write transaction.
+    ts = int(time.time())
+    with connect(config.db_path) as conn:
+        for mid, question, slug in fetched:
+            conn.execute(
+                "INSERT OR REPLACE INTO market_meta (market_id, source, question, slug, updated_ts) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (mid, args.source, question, slug, ts),
+            )
+    print(f"backfilled {len(fetched)}/{len(missing)}")
 
 
 if __name__ == "__main__":
