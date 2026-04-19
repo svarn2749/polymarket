@@ -44,6 +44,16 @@ class MarketEval:
     signal: float
     mid: float
     book: OrderBook
+    imbalance: float = 0.0  # (bid_depth - ask_depth) / total, top 3 levels
+
+
+def _compute_imbalance(book: OrderBook, depth: int = 3) -> float:
+    bid_sz = sum(s for _, s in book.bids[:depth])
+    ask_sz = sum(s for _, s in book.asks[:depth])
+    total = bid_sz + ask_sz
+    if total <= 0:
+        return 0.0
+    return (bid_sz - ask_sz) / total
 
 
 def _compute_signal(prices: pd.Series, lookback_hours: int) -> float | None:
@@ -97,9 +107,11 @@ def _fetch_evals(
         if book.mid is None or book.best_bid is None or book.best_ask is None:
             continue
 
+        imbalance = _compute_imbalance(book)
         conn.execute(
-            "INSERT OR REPLACE INTO snapshots (ts, market_id, bid, ask, mid) VALUES (?, ?, ?, ?, ?)",
-            (ts, market.id, book.best_bid, book.best_ask, book.mid),
+            "INSERT OR REPLACE INTO snapshots (ts, market_id, bid, ask, mid, imbalance) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (ts, market.id, book.best_bid, book.best_ask, book.mid, imbalance),
         )
         conn.execute(
             "INSERT OR REPLACE INTO signals (ts, market_id, value, direction) VALUES (?, ?, ?, ?)",
@@ -112,7 +124,9 @@ def _fetch_evals(
             (market.id, market.source, market.question, market.slug,
              market.yes_id, market.no_id, ts),
         )
-        evals.append(MarketEval(market=market, signal=signal, mid=book.mid, book=book))
+        evals.append(
+            MarketEval(market=market, signal=signal, mid=book.mid, book=book, imbalance=imbalance)
+        )
     return evals, errors
 
 

@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
     bid REAL,
     ask REAL,
     mid REAL,
+    imbalance REAL,
     PRIMARY KEY (ts, market_id)
 );
 
@@ -105,6 +106,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE market_meta ADD COLUMN yes_id TEXT")
         if "no_id" not in cols:
             conn.execute("ALTER TABLE market_meta ADD COLUMN no_id TEXT")
+
+    # snapshots: add imbalance (top-3 depth bid/ask imbalance)
+    info = conn.execute("PRAGMA table_info(snapshots)").fetchall()
+    if info:
+        cols = {r[1] for r in info}
+        if "imbalance" not in cols:
+            conn.execute("ALTER TABLE snapshots ADD COLUMN imbalance REAL")
 
 
 def init(db_path: Path) -> None:
