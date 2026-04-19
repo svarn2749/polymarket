@@ -66,6 +66,7 @@ class KalshiSource:
         side: str = "yes",
         lookback_days: int | None = None,
         fidelity: int = 60,
+        client: httpx.Client | None = None,
     ) -> pd.DataFrame:
         ticker = market.id
         end_ts = int(time.time())
@@ -76,13 +77,19 @@ class KalshiSource:
             "end_ts": end_ts,
             "period_interval": fidelity,
         }
-        with httpx.Client(timeout=30) as client:
+        owns_client = client is None
+        if owns_client:
+            client = httpx.Client(timeout=30)
+        try:
             try:
                 resp = client.get(url, params=params)
                 resp.raise_for_status()
             except httpx.HTTPError:
                 return pd.DataFrame(columns=["ts", "price"])
             payload = resp.json()
+        finally:
+            if owns_client:
+                client.close()
         candles = payload.get("candlesticks", [])
         if not candles:
             return pd.DataFrame(columns=["ts", "price"])

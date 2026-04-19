@@ -150,12 +150,6 @@ def _safe_book(
     source: MarketSource, market: Market, client: httpx.Client
 ) -> OrderBook | None:
     try:
-        return source.get_order_book(market, client=client)  # type: ignore[call-arg]
-    except TypeError:
-        # Source doesn't accept a shared client kwarg; call without it.
-        try:
-            return source.get_order_book(market)
-        except httpx.HTTPError:
-            return None
+        return source.get_order_book(market, client=client)
     except httpx.HTTPError:
         return None

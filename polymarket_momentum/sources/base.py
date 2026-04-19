@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Protocol
 
+import httpx
 import pandas as pd
 
 
@@ -119,9 +120,16 @@ class MarketSource(Protocol):
         side: str = "yes",
         lookback_days: int | None = None,
         fidelity: int = 60,
+        client: httpx.Client | None = None,
     ) -> pd.DataFrame: ...
 
-    def get_order_book(self, market: Market, *, side: str = "yes") -> OrderBook: ...
+    def get_order_book(
+        self,
+        market: Market,
+        *,
+        side: str = "yes",
+        client: httpx.Client | None = None,
+    ) -> OrderBook: ...
 
     def fetch_positions(self) -> list[Position]: ...
 

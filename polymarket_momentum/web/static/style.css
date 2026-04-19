@@ -43,6 +43,20 @@ button:hover, select:hover { border-color: var(--link); }
 .controls { display: flex; align-items: center; gap: 8px; }
 .controls label { color: var(--muted); font-size: 12px; }
 
+.nav { display: flex; gap: 16px; }
+.nav a { color: var(--muted); font-size: 13px; }
+.nav a:hover { color: var(--link); }
+
+.summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    margin: 12px 0 16px;
+}
+.summary > div { display: flex; flex-direction: column; }
+.summary .label { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.summary .value { font-size: 18px; font-variant-numeric: tabular-nums; }
+
 main { padding: 24px; display: grid; gap: 24px; }
 
 .panel {
