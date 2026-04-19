@@ -67,6 +67,12 @@ class PaperConfig:
     min_mid_price: float = 0.05
     max_mid_price: float = 0.65
 
+    # OFI (orderbook imbalance) filter on NEW entries. Backtest simulation
+    # lifted mean Sharpe 1.51 -> 1.61 by blocking ~5% of entries whose
+    # book-level depth imbalance is adversely opposed to the desired
+    # direction. Set to 1.01 to disable.
+    ofi_filter_threshold: float = 0.3
+
     # Loop
     poll_interval_sec: int = 300     # 5 min
     startup_delay_sec: int = 5

@@ -217,6 +217,7 @@ def _apply_reversion(
     held = current_positions(conn, strategy="reversion")
     n_trades = 0
     lo, hi = config.min_mid_price, config.max_mid_price
+    ofi_t = config.ofi_filter_threshold
 
     # 1) Evaluate markets currently visible in the universe.
     for e in evals:
@@ -230,6 +231,12 @@ def _apply_reversion(
         # Block NEW entries outside the price band, but keep exits alive.
         if current_size == 0 and direction != 0 and not (lo <= e.mid <= hi):
             continue
+        # OFI filter: block NEW entries where book imbalance adversely opposes
+        # the desired direction (long desired + strong sell-depth, or short
+        # desired + strong buy-depth). Exits unaffected.
+        if current_size == 0 and direction != 0 and ofi_t < 1.0:
+            if (direction > 0 and e.imbalance < -ofi_t) or (direction < 0 and e.imbalance > ofi_t):
+                continue
         desired = direction * config.position_size_usd / e.mid if direction != 0 else 0.0
         delta = desired - current_size
         if _execute_trade(
@@ -263,14 +270,24 @@ def _apply_cross_sectional(
     exit_k = min(exit_k, len(evals) // 2)  # can't exceed half the universe
 
     # For ranking, use all evals. For NEW entries only, filter by the price
-    # band so we don't open positions in the structurally-losing 65c+ region.
+    # band so we don't open positions in the structurally-losing 65c+ region,
+    # and by OFI so we don't enter when book depth adversely opposes.
     sorted_evals = sorted(evals, key=lambda e: e.signal)
     eval_by_id = {e.market.id: e for e in evals}
     lo, hi = config.min_mid_price, config.max_mid_price
+    ofi_t = config.ofi_filter_threshold
     tradeable = [e for e in sorted_evals if lo <= e.mid <= hi]
 
-    new_long = {e.market.id for e in tradeable[:k]}          # biggest drops — enter long
-    new_short = {e.market.id for e in tradeable[-k:]}        # biggest rallies — enter short
+    # For cross-sectional: long = biggest drops (want price to bounce up)
+    # so adverse OFI is strongly negative. Short = biggest rallies (want
+    # price to fall) so adverse OFI is strongly positive.
+    def _long_ofi_ok(e: MarketEval) -> bool:
+        return ofi_t >= 1.0 or e.imbalance >= -ofi_t
+    def _short_ofi_ok(e: MarketEval) -> bool:
+        return ofi_t >= 1.0 or e.imbalance <= ofi_t
+
+    new_long = {e.market.id for e in tradeable[:k] if _long_ofi_ok(e)}
+    new_short = {e.market.id for e in tradeable[-k:] if _short_ofi_ok(e)}
     hold_long = {e.market.id for e in sorted_evals[:exit_k]}
     hold_short = {e.market.id for e in sorted_evals[-exit_k:]}
 
