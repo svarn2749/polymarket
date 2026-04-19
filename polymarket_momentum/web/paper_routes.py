@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -18,8 +20,19 @@ router = APIRouter(prefix="/paper")
 
 
 @dataclass
+class MarketMeta:
+    question: str = ""
+    slug: str = ""
+    source: str = ""
+
+
+@dataclass
 class PaperPositionRow:
     market_id: str
+    question: str
+    slug: str
+    source: str
+    direction: str  # "long YES" / "short YES"
     size: float
     avg_entry_price: float
     last_price: float | None
@@ -42,7 +55,11 @@ class EquityPoint:
 @dataclass
 class PaperTradeRow:
     ts: int
+    ts_iso: str
     market_id: str
+    question: str
+    slug: str
+    source: str
     side: str
     size: float
     price: float
@@ -64,6 +81,32 @@ def _config_from_request(request: Request) -> PaperConfig:
     return config or PaperConfig.from_env()
 
 
+def _load_market_meta(config: PaperConfig) -> dict[str, MarketMeta]:
+    if not config.markets_csv.exists():
+        return {}
+    df = pd.read_csv(config.markets_csv, dtype=str)
+    out: dict[str, MarketMeta] = {}
+    for row in df.to_dict(orient="records"):
+        out[str(row["id"])] = MarketMeta(
+            question=str(row.get("question") or ""),
+            slug=str(row.get("slug") or ""),
+            source=str(row.get("source") or config.source),
+        )
+    return out
+
+
+def _fmt_ts(ts: int) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _direction_label(size: float) -> str:
+    if size > 0:
+        return "long YES"
+    if size < 0:
+        return "short YES"
+    return "flat"
+
+
 def _build_view(config: PaperConfig) -> PaperView:
     if not config.db_path.exists():
         return PaperView(
@@ -73,6 +116,11 @@ def _build_view(config: PaperConfig) -> PaperView:
             recent_trades=[],
             last_poll=None,
         )
+
+    meta = _load_market_meta(config)
+
+    def _meta(market_id: str) -> MarketMeta:
+        return meta.get(str(market_id)) or MarketMeta(source=config.source)
 
     with connect(config.db_path) as conn:
         positions_dict = current_positions(conn)
@@ -86,9 +134,14 @@ def _build_view(config: PaperConfig) -> PaperView:
             ).fetchone()
             if snap and snap["mid"] is not None:
                 pos.last_price = float(snap["mid"])
+            m = _meta(pos.market_id)
             positions_rows.append(
                 PaperPositionRow(
                     market_id=pos.market_id,
+                    question=m.question,
+                    slug=m.slug,
+                    source=m.source,
+                    direction=_direction_label(pos.size),
                     size=pos.size,
                     avg_entry_price=pos.avg_entry_price,
                     last_price=pos.last_price,
@@ -121,18 +174,25 @@ def _build_view(config: PaperConfig) -> PaperView:
             "SELECT ts, market_id, side, size, price, signal, strategy "
             "FROM trades ORDER BY id DESC LIMIT 25"
         ).fetchall()
-        trades = [
-            PaperTradeRow(
-                ts=int(r["ts"]),
-                market_id=str(r["market_id"]),
-                side=str(r["side"]),
-                size=float(r["size"]),
-                price=float(r["price"]),
-                signal=(float(r["signal"]) if r["signal"] is not None else None),
-                strategy=(str(r["strategy"]) if r["strategy"] is not None else None),
+        trades: list[PaperTradeRow] = []
+        for r in trade_rows:
+            market_id = str(r["market_id"])
+            m = _meta(market_id)
+            trades.append(
+                PaperTradeRow(
+                    ts=int(r["ts"]),
+                    ts_iso=_fmt_ts(int(r["ts"])),
+                    market_id=market_id,
+                    question=m.question,
+                    slug=m.slug,
+                    source=m.source,
+                    side=str(r["side"]),
+                    size=float(r["size"]),
+                    price=float(r["price"]),
+                    signal=(float(r["signal"]) if r["signal"] is not None else None),
+                    strategy=(str(r["strategy"]) if r["strategy"] is not None else None),
+                )
             )
-            for r in trade_rows
-        ]
 
         poll_row = conn.execute(
             "SELECT ts, duration_ms, n_markets, n_errors, n_trades, note "

@@ -53,6 +53,20 @@
     {% endif %}
 </section>
 
+{% macro market_link(slug, source, question, market_id) -%}
+{%- if question -%}
+    {%- if source == 'polymarket' and slug -%}
+    <a href="https://polymarket.com/market/{{ slug }}" target="_blank" rel="noopener">{{ question }}</a>
+    {%- elif source == 'kalshi' and slug -%}
+    <a href="https://kalshi.com/markets/{{ slug|lower }}" target="_blank" rel="noopener">{{ question }}</a>
+    {%- else -%}
+    {{ question }}
+    {%- endif -%}
+{%- else -%}
+<code>{{ market_id }}</code>
+{%- endif -%}
+{%- endmacro %}
+
 <section class="panel">
     <h2>Open paper positions</h2>
     {% if not view.positions %}
@@ -62,6 +76,7 @@
         <thead>
             <tr>
                 <th>Market</th>
+                <th>Direction</th>
                 <th>Size</th>
                 <th>Avg entry</th>
                 <th>Last</th>
@@ -74,7 +89,8 @@
         <tbody>
             {% for p in view.positions %}
             <tr>
-                <td><code>{{ p.market_id }}</code></td>
+                <td>{{ market_link(p.slug, p.source, p.question, p.market_id) }}</td>
+                <td class="{{ 'neg' if p.size < 0 else 'pos' if p.size > 0 else '' }}">{{ p.direction }}</td>
                 <td>{{ "%+.2f"|format(p.size) }}</td>
                 <td>{{ "%.3f"|format(p.avg_entry_price) }}</td>
                 <td>{% if p.last_price is not none %}{{ "%.3f"|format(p.last_price) }}{% else %}—{% endif %}</td>
@@ -108,9 +124,9 @@
         <tbody>
             {% for t in view.recent_trades %}
             <tr>
-                <td>{{ t.ts }}</td>
-                <td><code>{{ t.market_id }}</code></td>
-                <td>{{ t.side }}</td>
+                <td class="muted">{{ t.ts_iso }}</td>
+                <td>{{ market_link(t.slug, t.source, t.question, t.market_id) }}</td>
+                <td class="{{ 'neg' if t.side == 'sell' else 'pos' }}">{{ t.side }}</td>
                 <td>{{ "%+.2f"|format(t.size) }}</td>
                 <td>{{ "%.3f"|format(t.price) }}</td>
                 <td>{% if t.signal is not none %}{{ "%+.2f"|format(t.signal * 100) }}%{% else %}—{% endif %}</td>
