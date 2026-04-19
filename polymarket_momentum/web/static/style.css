@@ -57,8 +57,14 @@ button:hover, select:hover { border-color: var(--link); }
 .summary .label { color: var(--muted); font-size: 11px; text-transform: uppercase; }
 .summary .value { font-size: 18px; font-variant-numeric: tabular-nums; }
 
-.chart { margin: 6px 0 14px; }
-.equity-chart { width: 100%; height: 160px; display: block; }
+.chart { margin: 6px 0 14px; position: relative; }
+.equity-chart { width: 100%; height: 180px; display: block; }
+.equity-chart .axis-label {
+    fill: var(--muted);
+    font-size: 10px;
+    font-family: inherit;
+    font-variant-numeric: tabular-nums;
+}
 .chart-legend {
     display: flex;
     gap: 16px;
@@ -66,6 +72,21 @@ button:hover, select:hover { border-color: var(--link); }
     margin-top: 4px;
     flex-wrap: wrap;
 }
+.chart-tooltip {
+    position: absolute;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 11px;
+    pointer-events: none;
+    white-space: nowrap;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.5;
+    z-index: 10;
+}
+.chart-tooltip strong { font-size: 12px; }
 
 main { padding: 24px; display: grid; gap: 24px; }
 

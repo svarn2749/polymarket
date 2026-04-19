@@ -157,6 +157,9 @@
 {% endfor %}
 
 <script>
+const fmtUsd = v => (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
+const fmtTs = ts => new Date(ts * 1000).toISOString().slice(5, 16).replace('T', ' ');
+
 async function renderEquityChart(el, strategy) {
     const resp = await fetch(`/paper/api/equity?strategy=${strategy}&limit=500`);
     if (!resp.ok) { el.innerHTML = '<p class="muted">Failed to load chart.</p>'; return; }
@@ -166,18 +169,18 @@ async function renderEquityChart(el, strategy) {
         return;
     }
 
-    const w = 800, h = 160, pad = 32;
+    const w = 800, h = 180, padL = 52, padR = 16, padT = 10, padB = 30;
     const tsMin = points[0].ts, tsMax = points[points.length - 1].ts;
     const tsRange = (tsMax - tsMin) || 1;
     const values = points.flatMap(p => [p.total_pnl, p.realized_pnl]);
     values.push(0);
     const vMin = Math.min(...values);
     const vMax = Math.max(...values);
-    const vRange = (vMax - vMin) || 1;
-    const pad_v = vRange * 0.1;
+    const vPad = Math.max((vMax - vMin) * 0.1, 0.01);
+    const yLo = vMin - vPad, yHi = vMax + vPad;
 
-    const x = ts => pad + ((ts - tsMin) / tsRange) * (w - 2 * pad);
-    const y = v => h - pad - ((v - (vMin - pad_v)) / (vRange + 2 * pad_v)) * (h - 2 * pad);
+    const x = ts => padL + ((ts - tsMin) / tsRange) * (w - padL - padR);
+    const y = v => padT + ((yHi - v) / (yHi - yLo)) * (h - padT - padB);
 
     const pathFor = key => points
         .map((p, i) => `${i === 0 ? 'M' : 'L'}${x(p.ts).toFixed(1)},${y(p[key]).toFixed(1)}`)
@@ -189,26 +192,81 @@ async function renderEquityChart(el, strategy) {
     const last = points[points.length - 1];
     const lastClass = last.total_pnl >= 0 ? 'pos' : 'neg';
     const strokeColor = last.total_pnl >= 0 ? 'var(--pos)' : 'var(--neg)';
-    const fillColor = last.total_pnl >= 0
-        ? 'rgba(63, 185, 80, 0.15)'
-        : 'rgba(248, 81, 73, 0.15)';
+    const fillColor = last.total_pnl >= 0 ? 'rgba(63, 185, 80, 0.15)' : 'rgba(248, 81, 73, 0.15)';
 
-    const firstTs = new Date(tsMin * 1000).toISOString().slice(5, 16).replace('T', ' ');
-    const lastTs = new Date(tsMax * 1000).toISOString().slice(5, 16).replace('T', ' ');
+    // Y-axis ticks: vMax, zero, vMin (only render zero if inside range)
+    const yTicks = [yHi, 0, yLo].filter((v, i, arr) => i === arr.indexOf(v));
+    const yTickSvg = yTicks.map(v => {
+        const ty = y(v).toFixed(1);
+        return `
+            <line x1="${padL}" x2="${w - padR}" y1="${ty}" y2="${ty}"
+                  stroke="#2a2f37" stroke-dasharray="${v === 0 ? '2,3' : '1,4'}"></line>
+            <text x="${padL - 6}" y="${ty}" class="axis-label" text-anchor="end" dominant-baseline="middle">${fmtUsd(v)}</text>`;
+    }).join('');
+
+    const xTickSvg = `
+        <text x="${padL}" y="${h - 8}" class="axis-label" text-anchor="start">${fmtTs(tsMin)}</text>
+        <text x="${w - padR}" y="${h - 8}" class="axis-label" text-anchor="end">${fmtTs(tsMax)}</text>`;
 
     el.innerHTML = `
         <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" class="equity-chart">
-            <line x1="${pad}" x2="${w - pad}" y1="${zeroY}" y2="${zeroY}"
-                  stroke="#3a3f48" stroke-dasharray="2,3"></line>
+            ${yTickSvg}
             <path d="${areaPath}" fill="${fillColor}"></path>
             <path d="${totalPath}" fill="none" stroke="${strokeColor}" stroke-width="1.5"></path>
             <path d="${realizedPath}" fill="none" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3,2"></path>
+            <line class="hover-line" x1="0" x2="0" y1="${padT}" y2="${h - padB}" stroke="#8b949e" stroke-dasharray="2,2" style="display:none"></line>
+            <circle class="hover-dot total" r="3" fill="${strokeColor}" style="display:none"></circle>
+            <circle class="hover-dot realized" r="2.5" fill="var(--muted)" style="display:none"></circle>
+            ${xTickSvg}
         </svg>
+        <div class="chart-tooltip" hidden></div>
         <div class="chart-legend">
             <span class="${lastClass}">— total PnL</span>
             <span class="muted">-- realized</span>
-            <span class="muted">· ${points.length} polls · ${firstTs} → ${lastTs} UTC</span>
+            <span class="muted">· ${points.length} polls</span>
         </div>`;
+
+    const svg = el.querySelector('svg');
+    const tooltip = el.querySelector('.chart-tooltip');
+    const hoverLine = svg.querySelector('.hover-line');
+    const dotTotal = svg.querySelector('.hover-dot.total');
+    const dotRealized = svg.querySelector('.hover-dot.realized');
+
+    svg.addEventListener('mousemove', e => {
+        const rect = svg.getBoundingClientRect();
+        const svgX = ((e.clientX - rect.left) / rect.width) * w;
+        let nearest = points[0], best = Infinity;
+        for (const p of points) {
+            const d = Math.abs(x(p.ts) - svgX);
+            if (d < best) { best = d; nearest = p; }
+        }
+        const nx = x(nearest.ts);
+        hoverLine.setAttribute('x1', nx);
+        hoverLine.setAttribute('x2', nx);
+        hoverLine.style.display = '';
+        dotTotal.setAttribute('cx', nx); dotTotal.setAttribute('cy', y(nearest.total_pnl));
+        dotTotal.style.display = '';
+        dotRealized.setAttribute('cx', nx); dotRealized.setAttribute('cy', y(nearest.realized_pnl));
+        dotRealized.style.display = '';
+
+        tooltip.innerHTML =
+            `<div><strong>${fmtTs(nearest.ts)}</strong></div>` +
+            `<div>total <span class="${nearest.total_pnl >= 0 ? 'pos' : 'neg'}">${fmtUsd(nearest.total_pnl)}</span></div>` +
+            `<div>realized <span class="${nearest.realized_pnl >= 0 ? 'pos' : 'neg'}">${fmtUsd(nearest.realized_pnl)}</span></div>` +
+            `<div>unrealized <span class="${nearest.unrealized_pnl >= 0 ? 'pos' : 'neg'}">${fmtUsd(nearest.unrealized_pnl)}</span></div>` +
+            `<div class="muted">${nearest.n_positions} positions · $${nearest.gross_exposure.toFixed(2)} gross</div>`;
+        tooltip.hidden = false;
+        const tipX = Math.min(rect.width - 180, Math.max(0, e.clientX - rect.left + 10));
+        const tipY = Math.max(0, e.clientY - rect.top - 60);
+        tooltip.style.left = tipX + 'px';
+        tooltip.style.top = tipY + 'px';
+    });
+    svg.addEventListener('mouseleave', () => {
+        tooltip.hidden = true;
+        hoverLine.style.display = 'none';
+        dotTotal.style.display = 'none';
+        dotRealized.style.display = 'none';
+    });
 }
 
 document.querySelectorAll('[data-chart-strategy]').forEach(el => {
