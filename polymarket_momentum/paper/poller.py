@@ -202,6 +202,7 @@ def _apply_reversion(
 ) -> int:
     held = current_positions(conn, strategy="reversion")
     n_trades = 0
+    lo, hi = config.min_mid_price, config.max_mid_price
 
     # 1) Evaluate markets currently visible in the universe.
     for e in evals:
@@ -212,6 +213,9 @@ def _apply_reversion(
             entry_threshold=config.entry_threshold,
             exit_threshold=config.exit_threshold,
         )
+        # Block NEW entries outside the price band, but keep exits alive.
+        if current_size == 0 and direction != 0 and not (lo <= e.mid <= hi):
+            continue
         desired = direction * config.position_size_usd / e.mid if direction != 0 else 0.0
         delta = desired - current_size
         if _execute_trade(
@@ -244,11 +248,15 @@ def _apply_cross_sectional(
     exit_k = max(k + 1, int(k * band))
     exit_k = min(exit_k, len(evals) // 2)  # can't exceed half the universe
 
+    # For ranking, use all evals. For NEW entries only, filter by the price
+    # band so we don't open positions in the structurally-losing 65c+ region.
     sorted_evals = sorted(evals, key=lambda e: e.signal)
     eval_by_id = {e.market.id: e for e in evals}
+    lo, hi = config.min_mid_price, config.max_mid_price
+    tradeable = [e for e in sorted_evals if lo <= e.mid <= hi]
 
-    new_long = {e.market.id for e in sorted_evals[:k]}       # biggest drops — enter long
-    new_short = {e.market.id for e in sorted_evals[-k:]}     # biggest rallies — enter short
+    new_long = {e.market.id for e in tradeable[:k]}          # biggest drops — enter long
+    new_short = {e.market.id for e in tradeable[-k:]}        # biggest rallies — enter short
     hold_long = {e.market.id for e in sorted_evals[:exit_k]}
     hold_short = {e.market.id for e in sorted_evals[-exit_k:]}
 

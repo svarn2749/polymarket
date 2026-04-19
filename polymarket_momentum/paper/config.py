@@ -61,6 +61,12 @@ class PaperConfig:
     position_size_usd: float = 5.0  # per-market, fits $100 across ~20 markets
     min_trade_usd: float = 1.0      # skip tiny rebalances
 
+    # Price filter — applied to NEW entries only. Backtest stratification
+    # shows the reversion signal is profitable at YES price 5c-65c and
+    # actively harmful at 85c+. Existing positions still close normally.
+    min_mid_price: float = 0.05
+    max_mid_price: float = 0.65
+
     # Loop
     poll_interval_sec: int = 300     # 5 min
     startup_delay_sec: int = 5
