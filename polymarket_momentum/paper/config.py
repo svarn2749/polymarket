@@ -32,6 +32,7 @@ class PaperConfig:
     universe_top_n: int = 30
     max_spread_bps: float = 400.0
     min_volume: float = 50_000.0  # for live fallback fetch on cold boot
+    min_days_to_expiry: float = 7.0  # skip markets resolving within N days
 
     # Strategy (both are run in parallel on the same universe)
     strategy: str = "reversion"   # legacy — kept for compatibility / reporting

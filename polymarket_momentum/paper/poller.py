@@ -413,6 +413,7 @@ async def poll_loop(config: PaperConfig, stop: asyncio.Event) -> None:
             spreads_csv=config.spreads_csv,
             top_n=config.universe_top_n,
             max_spread_bps=config.max_spread_bps,
+            min_days_to_expiry=config.min_days_to_expiry,
         )
         if not universe:
             print(

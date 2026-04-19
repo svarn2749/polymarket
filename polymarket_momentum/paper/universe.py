@@ -14,6 +14,7 @@ def load_universe(
     spreads_csv: Path | None,
     top_n: int,
     max_spread_bps: float,
+    min_days_to_expiry: float = 0.0,
 ) -> list[Market]:
     if not markets_csv.exists():
         return []
@@ -27,6 +28,12 @@ def load_universe(
         spreads = pd.read_csv(spreads_csv, dtype={"market_id": str})
         allowed = set(spreads.loc[spreads["spread_bps"] <= max_spread_bps, "market_id"])
         df = df[df["id"].astype(str).isin(allowed)]
+
+    if min_days_to_expiry > 0 and "end_date" in df.columns:
+        ends = pd.to_datetime(df["end_date"], errors="coerce", utc=True)
+        cutoff = pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=min_days_to_expiry)
+        # Keep markets without an end_date (NaT) and those expiring after the cutoff.
+        df = df[ends.isna() | (ends > cutoff)]
 
     df = df.head(top_n)
 
