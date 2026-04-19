@@ -237,7 +237,11 @@ def _build_view(config: PaperConfig) -> PaperView:
             "SELECT ts, duration_ms, n_markets, n_errors, n_trades, note "
             "FROM poll_log ORDER BY ts DESC LIMIT 1"
         ).fetchone()
-        last_poll = dict(poll_row) if poll_row else None
+        if poll_row:
+            last_poll = dict(poll_row)
+            last_poll["ts_iso"] = _fmt_ts(int(poll_row["ts"]))
+        else:
+            last_poll = None
 
     return PaperView(
         config=_config_summary(config),

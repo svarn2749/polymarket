@@ -44,6 +44,7 @@
             <span class="value">${{ "%.2f"|format(s.latest_equity.gross_exposure) }}</span>
         </div>
     </div>
+    <div class="chart" data-chart-strategy="{{ s.name }}"></div>
     {% else %}
     <p class="muted">No equity history yet.</p>
     {% endif %}
@@ -141,7 +142,7 @@
 
     {% if view.last_poll %}
     <p class="meta">
-        Last poll: {{ view.last_poll.ts }} ·
+        Last poll: {{ view.last_poll.ts_iso }} ·
         {{ view.last_poll.duration_ms }}ms ·
         {{ view.last_poll.n_markets }} markets ·
         {{ view.last_poll.n_trades }} trades ·
@@ -154,4 +155,66 @@
 {% for s in view.strategies %}
 {{ strategy_block(s) }}
 {% endfor %}
+
+<script>
+async function renderEquityChart(el, strategy) {
+    const resp = await fetch(`/paper/api/equity?strategy=${strategy}&limit=500`);
+    if (!resp.ok) { el.innerHTML = '<p class="muted">Failed to load chart.</p>'; return; }
+    const { points } = await resp.json();
+    if (!points || points.length < 2) {
+        el.innerHTML = '<p class="muted">Need at least 2 polls to draw a chart.</p>';
+        return;
+    }
+
+    const w = 800, h = 160, pad = 32;
+    const tsMin = points[0].ts, tsMax = points[points.length - 1].ts;
+    const tsRange = (tsMax - tsMin) || 1;
+    const values = points.flatMap(p => [p.total_pnl, p.realized_pnl]);
+    values.push(0);
+    const vMin = Math.min(...values);
+    const vMax = Math.max(...values);
+    const vRange = (vMax - vMin) || 1;
+    const pad_v = vRange * 0.1;
+
+    const x = ts => pad + ((ts - tsMin) / tsRange) * (w - 2 * pad);
+    const y = v => h - pad - ((v - (vMin - pad_v)) / (vRange + 2 * pad_v)) * (h - 2 * pad);
+
+    const pathFor = key => points
+        .map((p, i) => `${i === 0 ? 'M' : 'L'}${x(p.ts).toFixed(1)},${y(p[key]).toFixed(1)}`)
+        .join(' ');
+    const totalPath = pathFor('total_pnl');
+    const realizedPath = pathFor('realized_pnl');
+    const zeroY = y(0).toFixed(1);
+    const areaPath = `${totalPath} L${x(tsMax).toFixed(1)},${zeroY} L${x(tsMin).toFixed(1)},${zeroY} Z`;
+    const last = points[points.length - 1];
+    const lastClass = last.total_pnl >= 0 ? 'pos' : 'neg';
+    const strokeColor = last.total_pnl >= 0 ? 'var(--pos)' : 'var(--neg)';
+    const fillColor = last.total_pnl >= 0
+        ? 'rgba(63, 185, 80, 0.15)'
+        : 'rgba(248, 81, 73, 0.15)';
+
+    const firstTs = new Date(tsMin * 1000).toISOString().slice(5, 16).replace('T', ' ');
+    const lastTs = new Date(tsMax * 1000).toISOString().slice(5, 16).replace('T', ' ');
+
+    el.innerHTML = `
+        <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" class="equity-chart">
+            <line x1="${pad}" x2="${w - pad}" y1="${zeroY}" y2="${zeroY}"
+                  stroke="#3a3f48" stroke-dasharray="2,3"></line>
+            <path d="${areaPath}" fill="${fillColor}"></path>
+            <path d="${totalPath}" fill="none" stroke="${strokeColor}" stroke-width="1.5"></path>
+            <path d="${realizedPath}" fill="none" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3,2"></path>
+        </svg>
+        <div class="chart-legend">
+            <span class="${lastClass}">— total PnL</span>
+            <span class="muted">-- realized</span>
+            <span class="muted">· ${points.length} polls · ${firstTs} → ${lastTs} UTC</span>
+        </div>`;
+}
+
+document.querySelectorAll('[data-chart-strategy]').forEach(el => {
+    renderEquityChart(el, el.dataset.chartStrategy).catch(e => {
+        el.innerHTML = `<p class="error">Chart error: ${e}</p>`;
+    });
+});
+</script>
 {% endblock %}
