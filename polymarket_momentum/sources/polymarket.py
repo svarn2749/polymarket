@@ -221,6 +221,8 @@ def _parse_market(payload: dict, *, min_volume: float) -> Market | None:
     volume = float(payload.get("volume") or 0)
     if volume < min_volume:
         return None
+    events = payload.get("events") or []
+    event_ticker = str(events[0].get("ticker", "")) if events else ""
     return Market(
         source=SOURCE_NAME,
         id=str(payload["id"]),
@@ -231,6 +233,8 @@ def _parse_market(payload: dict, *, min_volume: float) -> Market | None:
         volume=volume,
         end_date=payload.get("endDate"),
         closed=bool(payload.get("closed")),
+        event_ticker=event_ticker,
+        fee_type=str(payload.get("feeType") or ""),
     )
 
 

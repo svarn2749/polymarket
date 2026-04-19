@@ -33,6 +33,10 @@ class PaperConfig:
     max_spread_bps: float = 400.0
     min_volume: float = 50_000.0  # for live fallback fetch on cold boot
     min_days_to_expiry: float = 7.0  # skip markets resolving within N days
+    # Comma-separated topic labels (see polymarket_momentum.topic.derive_topic)
+    # to exclude from the universe. Default excludes crypto (Sharpe ~1.0 in
+    # backtest — signal tracks efficient BTC/ETH spot) and weather (thin).
+    exclude_topics: str = "crypto,weather"
 
     # Strategy (both are run in parallel on the same universe)
     strategy: str = "reversion"   # legacy — kept for compatibility / reporting

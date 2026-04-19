@@ -224,6 +224,8 @@ def _parse_market(payload: dict, *, min_volume: float) -> Market | None:
         no_id=f"{ticker}:no",
         volume=volume,
         end_date=payload.get("close_time"),
+        event_ticker=str(event_ticker),
+        fee_type="",
     )
 
 

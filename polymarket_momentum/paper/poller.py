@@ -414,6 +414,7 @@ async def poll_loop(config: PaperConfig, stop: asyncio.Event) -> None:
             top_n=config.universe_top_n,
             max_spread_bps=config.max_spread_bps,
             min_days_to_expiry=config.min_days_to_expiry,
+            exclude_topics=config.exclude_topics,
         )
         if not universe:
             print(

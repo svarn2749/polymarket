@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from ..sources.base import Market
+from ..topic import derive_topic
 
 
 def load_universe(
@@ -15,6 +16,7 @@ def load_universe(
     top_n: int,
     max_spread_bps: float,
     min_days_to_expiry: float = 0.0,
+    exclude_topics: str = "",
 ) -> list[Market]:
     if not markets_csv.exists():
         return []
@@ -34,6 +36,13 @@ def load_universe(
         cutoff = pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=min_days_to_expiry)
         # Keep markets without an end_date (NaT) and those expiring after the cutoff.
         df = df[ends.isna() | (ends > cutoff)]
+
+    excluded = {t.strip().lower() for t in exclude_topics.split(",") if t.strip()}
+    if excluded:
+        topics = [derive_topic(s, q) for s, q in zip(df.get("slug", ""), df.get("question", ""))]
+        df = df.assign(_topic=topics)
+        df = df[~df["_topic"].str.lower().isin(excluded)]
+        df = df.drop(columns=["_topic"])
 
     df = df.head(top_n)
 

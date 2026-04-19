@@ -17,6 +17,9 @@ class Market:
       for each side. For Polymarket these are CLOB token ids. For Kalshi these are
       the market ticker paired with a side label ("yes"/"no") — encoded as strings
       the source can parse back.
+    - `event_ticker` / `fee_type`: optional source-supplied classification hints.
+      Polymarket: `events[0].ticker` and `feeType`. Kalshi: `event_ticker` field.
+      Useful for topic stratification without relying on slug regex heuristics.
     """
 
     source: str
@@ -28,6 +31,8 @@ class Market:
     volume: float
     end_date: str | None
     closed: bool = False
+    event_ticker: str = ""
+    fee_type: str = ""
 
 
 @dataclass
