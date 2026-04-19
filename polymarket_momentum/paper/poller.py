@@ -215,6 +215,26 @@ def poll_once(
     )
 
 
+def _ensure_markets_csv(source: MarketSource, config: PaperConfig) -> None:
+    """On first boot (no markets.csv present), fetch a universe live and cache it."""
+    if config.markets_csv.exists():
+        return
+    print(f"[paper] no cached universe at {config.markets_csv} — fetching live from {source.name}")
+    try:
+        markets = source.list_markets(
+            min_volume=config.min_volume,
+            limit=max(100, config.universe_top_n * 3),
+        )
+    except Exception as exc:
+        print(f"[paper] live market list failed: {exc}")
+        return
+    if not markets:
+        print("[paper] live list_markets returned 0 markets — API issue?")
+        return
+    source.write_market_metadata(markets, config.markets_csv)
+    print(f"[paper] cached {len(markets)} markets to {config.markets_csv}")
+
+
 async def poll_loop(config: PaperConfig, stop: asyncio.Event) -> None:
     if config.startup_delay_sec > 0:
         try:
@@ -225,6 +245,7 @@ async def poll_loop(config: PaperConfig, stop: asyncio.Event) -> None:
 
     source = get_source(config.source)
     while not stop.is_set():
+        await asyncio.to_thread(_ensure_markets_csv, source, config)
         universe = load_universe(
             source=config.source,
             markets_csv=config.markets_csv,

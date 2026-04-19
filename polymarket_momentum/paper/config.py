@@ -5,11 +5,21 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 
+def _data_root() -> Path:
+    # Railway-style volume mount takes priority, else fall back to repo-local data/.
+    return Path("/data") if Path("/data").is_dir() else Path("data")
+
+
 def _default_db_path() -> Path:
-    # Railway-style volume mount takes priority, else fall back to local data/.
-    if Path("/data").is_dir():
-        return Path("/data/paper.db")
-    return Path("data/paper.db")
+    return _data_root() / "paper.db"
+
+
+def _default_markets_csv() -> Path:
+    return _data_root() / "markets.csv"
+
+
+def _default_spreads_csv() -> Path:
+    return _data_root() / "spreads.csv"
 
 
 @dataclass
@@ -17,10 +27,11 @@ class PaperConfig:
     source: str = "polymarket"
 
     # Universe selection
-    markets_csv: Path = Path("data/markets.csv")
-    spreads_csv: Path = Path("data/spreads.csv")
+    markets_csv: Path = field(default_factory=_default_markets_csv)
+    spreads_csv: Path = field(default_factory=_default_spreads_csv)
     universe_top_n: int = 30
     max_spread_bps: float = 400.0
+    min_volume: float = 50_000.0  # for live fallback fetch on cold boot
 
     # Strategy (reversion is the validated winner)
     strategy: str = "reversion"
