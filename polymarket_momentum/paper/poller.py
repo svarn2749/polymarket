@@ -141,6 +141,50 @@ def _execute_trade(
     return True
 
 
+def _reversion_desired_direction(
+    *,
+    current_size: float,
+    signal: float,
+    entry_threshold: float,
+    exit_threshold: float,
+) -> float:
+    """Return the desired raw direction (-1, 0, +1) after applying reversion logic.
+
+    Stateless when exit_threshold <= 0: position = -sign(signal) when |signal| > entry, else 0.
+    With hysteresis: once in a position, hold until |signal| < exit_threshold OR signal
+    crosses past the opposite entry band (flip).
+    """
+    # Treat reversion positions in "raw" (pre-flip) signal space so the hysteresis
+    # logic mirrors sized_position_hysteresis exactly.
+    raw_current = 0.0 if current_size == 0 else -math.copysign(1.0, current_size)
+
+    use_hysteresis = exit_threshold > 0.0
+    if not use_hysteresis:
+        if abs(signal) > entry_threshold:
+            raw_new = math.copysign(1.0, signal)
+        else:
+            raw_new = 0.0
+    else:
+        if raw_current == 0.0:
+            if signal > entry_threshold:
+                raw_new = 1.0
+            elif signal < -entry_threshold:
+                raw_new = -1.0
+            else:
+                raw_new = 0.0
+        else:
+            if raw_current > 0 and signal < -entry_threshold:
+                raw_new = -1.0
+            elif raw_current < 0 and signal > entry_threshold:
+                raw_new = 1.0
+            elif abs(signal) < exit_threshold:
+                raw_new = 0.0
+            else:
+                raw_new = raw_current  # hold
+
+    return -raw_new  # flip for reversion
+
+
 def _apply_reversion(
     evals: list[MarketEval],
     *,
@@ -150,17 +194,18 @@ def _apply_reversion(
     source_name: str,
 ) -> int:
     held = current_positions(conn, strategy="reversion")
-    eval_by_id = {e.market.id: e for e in evals}
     n_trades = 0
 
     # 1) Evaluate markets currently visible in the universe.
     for e in evals:
         current_size = held[e.market.id].size if e.market.id in held else 0.0
-        if abs(e.signal) > config.entry_threshold:
-            direction = -math.copysign(1.0, e.signal)  # fade
-            desired = direction * config.position_size_usd / e.mid
-        else:
-            desired = 0.0
+        direction = _reversion_desired_direction(
+            current_size=current_size,
+            signal=e.signal,
+            entry_threshold=config.entry_threshold,
+            exit_threshold=config.exit_threshold,
+        )
+        desired = direction * config.position_size_usd / e.mid if direction != 0 else 0.0
         delta = desired - current_size
         if _execute_trade(
             conn, ts=ts, market_id=e.market.id, delta=delta, signal=e.signal,

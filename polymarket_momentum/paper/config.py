@@ -37,6 +37,11 @@ class PaperConfig:
     strategy: str = "reversion"   # legacy — kept for compatibility / reporting
     lookback_hours: int = 24
     entry_threshold: float = 0.20  # per-market reversion threshold
+    # Hysteresis exit band: once in a position, hold until |signal| falls
+    # below this (unless the signal crosses the opposite entry threshold,
+    # which causes a flip). 0.0 disables hysteresis — stateless behavior
+    # where the position closes as soon as |signal| dips below entry_threshold.
+    exit_threshold: float = 0.0
 
     # Cross-sectional strategy: long the bottom-K signal, short the top-K.
     cross_sectional_enabled: bool = True
